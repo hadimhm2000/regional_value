@@ -102,6 +102,50 @@ def test_total_and_steps():
     assert steps[-1][2] == res["total"]
 
 
+def test_share_applied_to_land_and_building():
+    from fractions import Fraction as F
+    rates = {"residential": {"concrete": 10_000_000, "other": 4_000_000}}
+    land = ac.compute_land_value(250, "مسکونی", TAX)                       # ۲٬۰۰۰٬۰۰۰٬۰۰۰
+    b = ac.compute_building_value(rates, "residential", "concrete", 100, complete=True, floor=1, age=0)
+    res = ac.compute_all(land, b, land_share=F(1, 2), building_share=F(1, 3))
+    assert res["land_value"] == 1_000_000_000
+    assert res["building_value"] == 333_333_333                             # ۱٬۰۰۰٬۰۰۰٬۰۰۰ ÷ ۳
+    assert res["total"] == 1_333_333_333
+    assert res["full_total"] == land["value"] + b["value"]
+    # ارزش کامل (ششدانگ) دست نخورده می‌ماند
+    assert land["value"] == 2_000_000_000 and b["value"] == 1_000_000_000
+    steps = ac.explain_steps(res)
+    titles = [t for t, _, _ in steps]
+    assert "سهم مالکانه از عرصه" in titles and "سهم مالکانه از اعیانی" in titles
+    assert steps[-1][2] == res["total"]
+
+
+def test_share_as_string_and_default():
+    land = ac.compute_land_value(100, "مسکونی", TAX)
+    assert ac.compute_all(land, None, land_share="1/4")["total"] == 200_000_000
+    res = ac.compute_all(land, None)
+    assert res["total"] == land["value"] and "سهم مالکانه از عرصه" not in [t for t, _, _ in ac.explain_steps(res)]
+
+
+def test_no_building():
+    land = ac.compute_land_value(100, "تجاری", TAX)
+    res = ac.compute_all(land, None, land_share="1/2")
+    assert res["building"] is None and res["building_value"] == 0
+    assert res["total"] == 1_000_000_000
+    steps = ac.explain_steps(res)
+    assert steps[-1][2] == res["total"] and "فاقد اعیانی" in steps[-1][1]
+
+
+def test_invalid_share_rejected():
+    land = ac.compute_land_value(100, "مسکونی", TAX)
+    for bad in ["0", "3/2", "-1/2"]:
+        try:
+            ac.compute_all(land, None, land_share=bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"سهم نامعتبر پذیرفته شد: {bad}")
+
+
 if __name__ == "__main__":
     import sys
     fails = 0

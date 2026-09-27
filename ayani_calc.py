@@ -20,7 +20,8 @@
                  تجاری هر طبقه بالاتر/پایین‌تر از همکف −۱۰٪ (حداکثر −۳۰٪)
         ۲) پارکینگ و انباری: متراژ × ۵۰٪ نرخ اکسل
         ۳) قدمت: هر سال ۲٪ (حداکثر ۲۰ سال = ۴۰٪) از جمع بندهای فوق کسر می‌شود.
-  ارزش منطقه‌ای کل = ارزش عرصه + ارزش اعیانی
+  سهم مالکانه (ownership_share): ارزش عرصه × سهم عرصه + ارزش اعیانی × سهم اعیانی
+  ارزش منطقه‌ای کل = ارزش (سهم) عرصه + ارزش (سهم) اعیانی — ملک فاقد اعیانی: فقط عرصه
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ import math
 import os
 import re
 from decimal import Decimal, ROUND_HALF_UP
+
+import ownership_share
 
 logger = logging.getLogger(__name__)
 
@@ -301,8 +304,38 @@ def compute_building_value(rates: dict, use_key: str, structure: str, area,
     return res
 
 
-def compute_all(land: dict, building: dict) -> dict:
-    return {"land": land, "building": building, "total": land["value"] + building["value"]}
+def compute_all(land: dict, building: dict = None, land_share=1, building_share=1) -> dict:
+    """
+    جمع نهایی با اعمال «سهم مالکانه» (ownership_share).
+      building=None       → ملک فاقد اعیانی است (ارزش اعیانی = ۰)
+      land_share          → سهم مالک از عرصه (کسر ۰ < s ≤ ۱؛ Fraction یا رشتهٔ «a/b»)
+      building_share      → سهم مالک از اعیانی
+    land["value"] / building["value"] همچنان ارزش کامل (ششدانگ) باقی می‌مانند؛
+    ارزش سهم مالک در land_value / building_value و جمع آن در total است.
+    """
+    ls = ownership_share.frac_from_str(land_share)
+    bs = ownership_share.frac_from_str(building_share)
+    for s in (ls, bs):
+        if not (0 < s <= 1):
+            raise ValueError("سهم مالکانه باید بزرگ‌تر از صفر و حداکثر ششدانگ باشد")
+    land_value = ownership_share.apply_share(land["value"], ls)
+    building_full = building["value"] if building else 0
+    building_value = ownership_share.apply_share(building_full, bs) if building else 0
+    return {
+        "land": land, "building": building,
+        "land_share": ownership_share.frac_to_str(ls),
+        "building_share": ownership_share.frac_to_str(bs) if building else None,
+        "land_value": land_value, "building_value": building_value,
+        "full_total": land["value"] + building_full,
+        "total": land_value + building_value,
+    }
+
+
+def _share_step(title: str, full_value: int, share: str, owned_value: int):
+    f = ownership_share.frac_from_str(share)
+    return (title,
+            f"{fmt(full_value)} × {f.numerator}/{f.denominator} (سهم مالکانه)",
+            owned_value)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -321,7 +354,11 @@ def explain_steps(result: dict) -> list:
     """
     لیستی از (عنوان، شرح/فرمول، مبلغ به ریال یا None) برای نمایش نحوهٔ محاسبه.
     """
-    land, b = result["land"], result["building"]
+    land, b = result["land"], result.get("building")
+    land_share = result.get("land_share") or "1"
+    bld_share = result.get("building_share") or "1"
+    land_owned = result.get("land_value", land["value"])
+    bld_owned = result.get("building_value", b["value"] if b else 0)
     steps = []
 
     # ── عرصه
@@ -336,8 +373,14 @@ def explain_steps(result: dict) -> list:
         steps.append(("ارزش عرصه",
                       f"{fmt(land['area'])} متر مربع × {fmt(land['unit_value'])} ریال (ارزش معاملاتی {land['land_use']})",
                       land["value"]))
+    if ownership_share.frac_from_str(land_share) != 1:
+        steps.append(_share_step("سهم مالکانه از عرصه", land["value"], land_share, land_owned))
 
     # ── اعیانی
+    if b is None:
+        steps.append(("ارزش منطقه‌ای کل", "ارزش عرصه (ملک فاقد اعیانی است)", result["total"]))
+        return steps
+
     if not b["complete"]:
         steps.append(("ارزش کامل اعیانی",
                       f"{fmt(b['area'])} متر مربع × {fmt(b['rate'])} ریال",
@@ -365,6 +408,11 @@ def explain_steps(result: dict) -> list:
                           f"{fmt(b['subtotal'])} × {_pct_str(b['age_pct'])}٪",
                           -b["age_deduction"]))
         steps.append(("ارزش اعیانی", "", b["value"]))
+    if ownership_share.frac_from_str(bld_share) != 1:
+        steps.append(_share_step("سهم مالکانه از اعیانی", b["value"], bld_share, bld_owned))
 
-    steps.append(("ارزش منطقه‌ای کل", "ارزش عرصه + ارزش اعیانی", result["total"]))
+    shared = ownership_share.frac_from_str(land_share) != 1 or ownership_share.frac_from_str(bld_share) != 1
+    steps.append(("ارزش منطقه‌ای کل",
+                  "سهم عرصه + سهم اعیانی" if shared else "ارزش عرصه + ارزش اعیانی",
+                  result["total"]))
     return steps

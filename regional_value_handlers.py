@@ -8,20 +8,26 @@
   ۳. ورود متراژ عرصه
   ۴. انتخاب کاربری زمین (مسکونی/تجاری/اداری/سایر)
      ↳ سایر: ۵ زیرگزینه با ضریب تعدیل (۰٫۷/۰٫۵/۰٫۴/۰٫۲/۰٫۱)
-  ۵. اعیانی: کاربری (مسکونی/تجاری/اداری/سایر ← صنعتی/کشاورزی) → نوع سازه →
-     متراژ (≤ عرصه) → تکمیل شده؟
+  ۵. ملک اعیانی دارد؟ (بله/خیر)
+  ۶. سهم مالکانه (ownership_share): ششدانگ / دانگ / سهم از سهم / درصد
+     ↳ «از کل ششدانگ است؟» خیر → حلقهٔ بعدی زنجیره (مثل «۲ سهم از ۴۸ سهم از ۳ دانگ»)
+     ↳ اگر اعیانی دارد: «سهم اعیانی همان سهم عرصه است؟» خیر → سهم اعیانی جداگانه
+  ۷. اعیانی (فقط اگر دارد): کاربری (مسکونی/تجاری/اداری/سایر ← صنعتی/کشاورزی) →
+     نوع سازه → متراژ → تکمیل شده؟
        خیر → مرحلهٔ ساخت (فونداسیون/اسکلت/سفت‌کاری/نازک‌کاری)
        بله → پارکینگ و انباری (متراژ) → طبقه (فقط مسکونی/تجاری/اداری) → قدمت
-  ۶. پیش‌نمایش (تایید / ویرایش هر مورد)
-  ۷. دسترسی (پس از تایید پیش‌نمایش):
+     (متراژ اعیانی می‌تواند از متراژ عرصه بیشتر باشد — ساختمان چندطبقه)
+  ۸. پلاک ثبتی (اختیاری — قابل رد شدن)
+  ۹. پیش‌نمایش (تایید / ویرایش هر مورد)
+  ۱۰. دسترسی (پس از تایید پیش‌نمایش):
        کاربر رایگانِ ادمین / مشترک فعال ← استعلام
        اعتبار رایگان (تست) ← مصرف یک اعتبار و استعلام
        بقیه ← متن معرفی سامانه + گزینهٔ «تست»:
          کد دفتر خدمات قضایی + کدملی مدیرعامل → ارسال برای ادمین →
          تایید ادمین = ۲ استعلام رایگان → پس از اتمام، انتخاب اشتراک
          ماهانه/سالانه → فاکتور بله → فعال‌شدن اشتراک
-  ۸. استعلام عرصه از سامانهٔ مالیاتی + تعیین شهرستان از روی نقشه + محاسبهٔ
-     اعیانی (ayani_calc) → PDF دو صفحه‌ای (ayani_pdf) → ارسال
+  ۱۱. استعلام عرصه از سامانهٔ مالیاتی + تعیین شهرستان از روی نقشه + محاسبهٔ
+     اعیانی (ayani_calc) × سهم مالکانه → PDF دو صفحه‌ای (ayani_pdf) → ارسال
 
 ویژگی‌های پایداری این نسخهٔ مستقل (حفظ‌شده):
   • هر استعلام حداکثر دو بار تلاش می‌شود (تلاش اول + یک تلاش مجدد خودکار).
@@ -35,6 +41,7 @@
 """
 
 import asyncio
+import copy
 import logging
 import os
 import tempfile
@@ -49,6 +56,7 @@ from aiogram.types import (
 )
 
 import ayani_calc
+import ownership_share as osh
 from config import ADMIN_ID, MAX_CONCURRENT_QUERIES, SUBSCRIPTION_PLANS, TRIAL_CREDITS
 from tax_geolocation_query import get_province_list, find_land_use_value, extract_all_land_use_values
 import access_control
@@ -75,6 +83,12 @@ class RVForm(StatesGroup):
     waiting_area = State()
     waiting_land_use = State()
     waiting_land_other = State()        # زیرگزینهٔ «سایر» کاربری عرصه (ضریب تعدیل)
+    waiting_has_building = State()      # ملک اعیانی دارد؟
+    waiting_share_type = State()        # سهم مالکانه: نوع (ششدانگ/دانگ/سهم از سهم/درصد)
+    waiting_share_amount = State()      # سهم مالکانه: مقدار (دانگ/درصد/صورت سهم)
+    waiting_share_den = State()         # سهم مالکانه: تعداد کل سهام (مخرج)
+    waiting_share_scope = State()       # سهم مالکانه: از کل ششدانگ است یا از بخشی از آن؟
+    waiting_share_same = State()        # سهم اعیانی همان سهم عرصه است؟
     waiting_bld_use = State()           # کاربری اعیانی
     waiting_bld_use_other = State()     # زیرگزینهٔ «سایر» کاربری اعیانی
     waiting_bld_structure = State()     # نوع سازه
@@ -85,6 +99,7 @@ class RVForm(StatesGroup):
     waiting_bld_parking_area = State()  # متراژ پارکینگ و انباری
     waiting_bld_floor = State()         # طبقه
     waiting_bld_age = State()           # قدمت
+    waiting_plak = State()              # مشخصات پلاک ثبتی (اختیاری)
     waiting_preview = State()           # پیش‌نمایش (تایید / ویرایش)
     waiting_edit_choice = State()       # انتخاب مورد ویرایش
     waiting_intro = State()             # متن معرفی سامانه + گزینهٔ «تست»
@@ -180,6 +195,11 @@ def _numbered(options: list) -> str:
     return "\n".join(f"{_to_fa(i)}. {o}" for i, o in enumerate(options, 1))
 
 
+def _has_bld(d: dict) -> bool:
+    """ملک اعیانی دارد؟ (فقط وقتی کاربر صریحاً «بله» زده باشد)"""
+    return d.get("rv_has_building") is True
+
+
 def _floor_applies(d: dict) -> bool:
     """سؤال طبقه فقط برای مسکونی/تجاری/اداریِ تکمیل‌شده (نه صنعتی/کشاورزی)."""
     return d.get("rv_bld_complete") is True and d.get("rv_bld_use") in ayani_calc.BUILDING_MAIN_KEYS
@@ -219,18 +239,29 @@ _STEPS = [
     ("area", ["rv_area"], lambda d: True),
     ("land_use", ["rv_land_use"], lambda d: True),
     ("land_other", ["rv_land_other_idx"], lambda d: d.get("rv_land_use") == "سایر"),
-    ("bld_use", ["rv_bld_use", "rv_bld_use_other_pending"], lambda d: True),
-    ("bld_structure", ["rv_bld_structure"], lambda d: True),
-    ("bld_area", ["rv_bld_area"], lambda d: True),
-    ("bld_complete", ["rv_bld_complete"], lambda d: True),
+    ("has_building", ["rv_has_building"], lambda d: True),
+    # سهم مالکانه — rv_share_wip: وضعیت موقت زیرفلوی ورود سهم (با پاک شدن مرحله پاک می‌شود)
+    ("share_arse", ["rv_share_arse", "rv_share_arse_links", "rv_share_wip"], lambda d: True),
+    ("share_same", ["rv_share_same"], _has_bld),
+    ("share_aayan", ["rv_share_aayan", "rv_share_aayan_links", "rv_share_wip"],
+     lambda d: _has_bld(d) and d.get("rv_share_same") is False),
+    ("bld_use", ["rv_bld_use", "rv_bld_use_other_pending"], _has_bld),
+    ("bld_structure", ["rv_bld_structure"], _has_bld),
+    ("bld_area", ["rv_bld_area"], _has_bld),
+    ("bld_complete", ["rv_bld_complete"], _has_bld),
     ("bld_stage", ["rv_bld_stage"], lambda d: d.get("rv_bld_complete") is False),
     ("bld_parking", ["rv_bld_has_parking"], lambda d: d.get("rv_bld_complete") is True),
     ("bld_parking_area", ["rv_bld_parking_area"], lambda d: d.get("rv_bld_has_parking") is True),
     ("bld_floor", ["rv_bld_floor"], _floor_applies),
     ("bld_age", ["rv_bld_age"], lambda d: d.get("rv_bld_complete") is True),
+    # آخرین مرحله: مشخصات پلاک ثبتی (اختیاری — «رد شدن» = رشتهٔ خالی)
+    ("plak", ["rv_plak_text"], lambda d: True),
 ]
 _STEP_INDEX = {name: i for i, (name, _, _) in enumerate(_STEPS)}
-_ALL_KEYS = [k for _, keys, _ in _STEPS for k in keys]
+_ALL_KEYS = list(dict.fromkeys(k for _, keys, _ in _STEPS for k in keys))
+# مراحل اعیانی (با «ندارد» همه پاک می‌شوند)
+_BLD_STEPS = ["share_same", "share_aayan", "bld_use", "bld_structure", "bld_area", "bld_complete",
+              "bld_stage", "bld_parking", "bld_parking_area", "bld_floor", "bld_age"]
 
 # فیلدهای قابل ویرایش در پیش‌نمایش: (عنوان، مراحلی که پاک و دوباره پرسیده می‌شوند، شرط نمایش)
 _EDIT_FIELDS = [
@@ -238,15 +269,18 @@ _EDIT_FIELDS = [
     ("آدرس / موقعیت روی نقشه", ["address"], lambda d: True),
     ("متراژ عرصه", ["area"], lambda d: True),
     ("کاربری زمین", ["land_use", "land_other"], lambda d: True),
-    ("کاربری اعیانی", ["bld_use"], lambda d: True),
-    ("نوع سازه", ["bld_structure"], lambda d: True),
-    ("متراژ اعیانی", ["bld_area"], lambda d: True),
+    ("وجود اعیانی", ["has_building"], lambda d: True),
+    ("سهم مالکانه", ["share_arse", "share_same", "share_aayan"], lambda d: True),
+    ("کاربری اعیانی", ["bld_use"], _has_bld),
+    ("نوع سازه", ["bld_structure"], _has_bld),
+    ("متراژ اعیانی", ["bld_area"], _has_bld),
     ("وضعیت تکمیل ساختمان", ["bld_complete", "bld_stage", "bld_parking", "bld_parking_area",
-                              "bld_floor", "bld_age"], lambda d: True),
+                              "bld_floor", "bld_age"], _has_bld),
     ("مرحلهٔ ساخت", ["bld_stage"], lambda d: d.get("rv_bld_complete") is False),
     ("پارکینگ و انباری", ["bld_parking", "bld_parking_area"], lambda d: d.get("rv_bld_complete") is True),
     ("طبقه", ["bld_floor"], _floor_applies),
     ("قدمت ساختمان", ["bld_age"], lambda d: d.get("rv_bld_complete") is True),
+    ("پلاک ثبتی", ["plak"], lambda d: True),
 ]
 
 
@@ -432,16 +466,8 @@ async def process_area(message: Message, state: FSMContext):
     if area is None:
         await message.answer("⚠️ متراژ نامعتبر است. لطفاً یک عدد مثبت (متر مربع) وارد کنید.")
         return
-    bld_area = (await state.get_data()).get("rv_bld_area")
-    if bld_area is not None and bld_area > area:
-        # (در حالت ویرایش) عرصهٔ جدید از اعیانیِ قبلی کوچک‌تر است → اعیانی دوباره پرسیده می‌شود
-        await message.answer(
-            f"ℹ️ متراژ اعیانی قبلی ({bld_area:,.0f} متر مربع) از عرصهٔ جدید بیشتر است؛ "
-            f"لطفاً متراژ اعیانی را دوباره وارد کنید."
-        )
-        await state.update_data(rv_area=area, rv_bld_area=None)
-    else:
-        await state.update_data(rv_area=area)
+    # متراژ اعیانی (زیربنا) می‌تواند از عرصه بیشتر باشد؛ محدودیتی بین این دو نیست.
+    await state.update_data(rv_area=area)
     await _advance(message, state)
 
 
@@ -507,6 +533,329 @@ async def process_land_other(message: Message, state: FSMContext):
         return
     await state.update_data(rv_land_other_idx=idx)
     await _advance(message, state)
+
+
+# ══════════════════════════════════════════════════════════════════
+# مرحلهٔ ۵-الف: ملک اعیانی دارد؟
+# ══════════════════════════════════════════════════════════════════
+async def _ask_has_building(message: Message, state: FSMContext):
+    await message.answer(
+        "🏗 آیا ملک دارای *اعیانی* (ساختمان / بنا) است؟\n\n"
+        "• بله: سهم مالکانه و مشخصات اعیانی پرسیده می‌شود\n"
+        "• خیر: پس از تعیین سهم مالکانه، مستقیماً به محاسبه می‌رود (فقط ارزش عرصه)",
+        reply_markup=_yes_no_kb,
+    )
+    await state.set_state(RVForm.waiting_has_building)
+
+
+@regional_value_router.message(RVForm.waiting_has_building)
+async def process_has_building(message: Message, state: FSMContext):
+    if not message.text:
+        return
+    if is_back(message.text):
+        await _go_back(message, state, "has_building")
+        return
+    if message.text in (_YES, "بله"):
+        # اگر قبلاً (در حالت ویرایش) اطلاعات اعیانی وارد شده، دست نخورده می‌ماند
+        await state.update_data(rv_has_building=True)
+    elif message.text in (_NO, "خیر"):
+        # همهٔ داده‌های اعیانی و سهم اعیانی پاک می‌شود
+        await state.update_data(rv_has_building=False, **_step_keys(_BLD_STEPS))
+    else:
+        await message.answer("⚠️ لطفاً «بله» یا «خیر» را انتخاب کنید.")
+        return
+    await _advance(message, state)
+
+
+# ══════════════════════════════════════════════════════════════════
+# مرحلهٔ ۵-ب: سهم مالکانه (زیرفلوی چندمرحله‌ای — ownership_share)
+#
+#  rv_share_wip = {"target": "arse"|"aayan", "links": [...], "stage": ..., "kind": ..., "num": ...}
+#    stage: type   → انتخاب نوع (ششدانگ / دانگ / سهم از سهم / درصد)
+#           amount → مقدار دانگ / درصد / تعداد سهم مالک
+#           den    → تعداد کل سهام (فقط «سهم از سهم»)
+#           scope  → «این مقدار از کل ششدانگ است؟» خیر → حلقهٔ بعدی زنجیره
+#  با تکمیل: rv_share_<target> = کسر نهایی («a/b») و rv_share_<target>_links = حلقه‌ها
+# ══════════════════════════════════════════════════════════════════
+_SHARE_TITLES = {"arse": "عرصه", "aayan": "اعیانی"}
+_SHARE_STEP = {"arse": "share_arse", "aayan": "share_aayan"}
+
+# (برچسب دکمه، نوع) — ششدانگ فقط برای حلقهٔ اول
+_SHARE_KINDS_FIRST = [
+    ("ششدانگ (مالکیت کامل)", osh.KIND_ALL),
+    ("دانگ (مثلاً ۳ دانگ یا ۱٫۵ دانگ)", osh.KIND_DANG),
+    ("سهم از سهم (مثلاً ۱۲٫۵ سهم از ۷۲ سهم)", osh.KIND_SAHM),
+    ("درصد (مثلاً ۲۵٪)", osh.KIND_PERCENT),
+]
+_SHARE_KINDS_NEXT = _SHARE_KINDS_FIRST[1:]
+
+_SCOPE_WHOLE = "✅ بله، از کل ششدانگ"
+_SCOPE_PART = "↪️ خیر، از بخشی از ملک"
+_scope_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=_SCOPE_WHOLE)], [KeyboardButton(text=_SCOPE_PART)],
+              nav_row()],
+    resize_keyboard=True,
+)
+
+
+def _share_kinds(wip: dict) -> list:
+    return _SHARE_KINDS_FIRST if not wip["links"] else _SHARE_KINDS_NEXT
+
+
+def _new_wip(target: str) -> dict:
+    return {"target": target, "links": [], "stage": "type", "kind": None, "num": None}
+
+
+async def _get_wip(state: FSMContext):
+    """کپی مستقل از وضعیت زیرفلو (تغییر درجا روی دادهٔ FSM انجام نشود)."""
+    return copy.deepcopy((await state.get_data()).get("rv_share_wip"))
+
+
+async def _ask_share(message: Message, state: FSMContext, target: str):
+    wip = await _get_wip(state)
+    if not wip or wip.get("target") != target:
+        wip = _new_wip(target)
+        await state.update_data(rv_share_wip=wip)
+    title = _SHARE_TITLES[target]
+    stage = wip["stage"]
+
+    if stage == "type":
+        kinds = _share_kinds(wip)
+        labels = [f"{_to_fa(i)}. {t}" for i, (t, _) in enumerate(kinds, 1)]
+        kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=l)] for l in labels]
+                                 + [nav_row()], resize_keyboard=True)
+        if not wip["links"]:
+            text = (
+                f"⚖️ *سهم مالکانه از {title}*\n\n"
+                f"مقدار مالکیت در سند (بخش «مقدار مالکیت» / «میزان سهم») به چه صورت نوشته شده است؟\n\n"
+                f"{_numbered([t for t, _ in kinds])}\n\n"
+                f"💡 اگر سند نوشته «ششدانگ … به‌استثنای ۱۲ سهم از ۷۲ سهم»، باقیمانده را وارد کنید "
+                f"(۶۰ سهم از ۷۲ سهم)."
+            )
+        else:
+            text = (
+                f"📎 تا اینجا: «{osh.describe_chain(wip['links']).replace(' از ششدانگ', '')}»\n\n"
+                f"این مقدار از *چه بخشی* از ملک است؟ نوع آن را انتخاب کنید:\n"
+                f"(مثلاً در «۲ سهم از ۴۸ سهم از ۳ دانگ»، بخش دوم «۳ دانگ» است)\n\n"
+                f"{_numbered([t for t, _ in kinds])}"
+            )
+        await message.answer(text, reply_markup=kb)
+        await state.set_state(RVForm.waiting_share_type)
+        return
+
+    if stage == "amount":
+        kind = wip["kind"]
+        if kind == osh.KIND_DANG:
+            text = ("🔢 مقدار *دانگ* را وارد کنید (بیشتر از ۰ و حداکثر ۶):\n"
+                    "مثال: ۳ — ۱٫۵ — ۲ و نیم")
+        elif kind == osh.KIND_PERCENT:
+            text = "🔢 *درصد* مالکیت را وارد کنید (بیشتر از ۰ و حداکثر ۱۰۰):\nمثال: ۲۵ — ۱۲٫۵"
+        else:
+            text = ("🔢 *تعداد سهم مالک* را وارد کنید (عدد اول):\n"
+                    "مثال: در «۱۲٫۵ سهم مشاع از ۷۲ سهم» عدد *۱۲٫۵*")
+        await message.answer(text, reply_markup=nav_only_kb())
+        await state.set_state(RVForm.waiting_share_amount)
+        return
+
+    if stage == "den":
+        await message.answer(
+            f"🔢 *تعداد کل سهام* را وارد کنید (عدد دوم):\n"
+            f"مثال: در «۱۲٫۵ سهم مشاع از ۷۲ سهم» عدد *۷۲*\n\n"
+            f"(سهم مالک: {osh.fmt_frac(wip['num'])} سهم)",
+            reply_markup=nav_only_kb(),
+        )
+        await state.set_state(RVForm.waiting_share_den)
+        return
+
+    # stage == "scope"
+    last = wip["links"][-1]
+    await message.answer(
+        f"✅ ثبت شد: «{osh.describe_link(last)}»\n\n"
+        f"آیا این مقدار از *کل ششدانگ* ملک است؟\n\n"
+        f"• بله: مثل «۳ دانگ مشاع از ششدانگ» یا «۱۲ سهم از ۷۲ سهم ششدانگ»\n"
+        f"• خیر: مثل «۲ سهم از ۴۸ سهم *از ۳ دانگ*» — یعنی سهم از بخشی از ملک",
+        reply_markup=_scope_kb,
+    )
+    await state.set_state(RVForm.waiting_share_scope)
+
+
+async def _finish_share(message: Message, state: FSMContext, wip: dict):
+    target = wip["target"]
+    share = osh.chain_fraction(wip["links"])
+    await state.update_data(**{
+        f"rv_share_{target}": osh.frac_to_str(share),
+        f"rv_share_{target}_links": wip["links"],
+        "rv_share_wip": None,
+    })
+    await message.answer(
+        f"✅ سهم مالکانه از {_SHARE_TITLES[target]}: *{osh.format_share(share)}*"
+        + (f"\n↳ طبق سند: {osh.describe_chain(wip['links'])}" if _share_needs_detail(wip["links"]) else "")
+    )
+    await _advance(message, state)
+
+
+def _share_needs_detail(links) -> bool:
+    """شرح «طبق سند» فقط وقتی مفید است که با خود سهم نهایی تکراری نباشد."""
+    return bool(links) and (len(links) > 1 or links[0]["k"] in (osh.KIND_SAHM, osh.KIND_PERCENT))
+
+
+@regional_value_router.message(RVForm.waiting_share_type)
+@regional_value_router.message(RVForm.waiting_share_amount)
+@regional_value_router.message(RVForm.waiting_share_den)
+@regional_value_router.message(RVForm.waiting_share_scope)
+async def process_share(message: Message, state: FSMContext):
+    if not message.text:
+        return
+    d = await state.get_data()
+    wip = copy.deepcopy(d.get("rv_share_wip"))
+    if not wip:
+        # وضعیت زیرفلو از دست رفته (مثلاً ری‌استارت) → پرسیدن دوباره از اول همین مرحله
+        await _advance(message, state)
+        return
+    target, stage = wip["target"], wip["stage"]
+    text = message.text.strip()
+
+    # ── بازگشت: یک گام به عقب در همین زیرفلو
+    if is_back(text):
+        if stage == "type":
+            if not wip["links"]:
+                await _go_back(message, state, _SHARE_STEP[target])
+                return
+            wip["stage"] = "scope"
+        elif stage == "amount":
+            wip.update(stage="type", kind=None, num=None)
+        elif stage == "den":
+            wip.update(stage="amount", num=None)
+        else:  # scope → حذف آخرین حلقه و ورود دوبارهٔ مقدار آن
+            last = wip["links"].pop()
+            wip.update(stage="amount", kind=last["k"], num=None)
+        await state.update_data(rv_share_wip=wip)
+        await _advance(message, state)
+        return
+
+    # ── انتخاب نوع
+    if stage == "type":
+        kinds = _share_kinds(wip)
+        # فقط دکمه یا شمارهٔ خالی پذیرفته می‌شود (مثلاً «۳ دانگ» تایپ‌شده نباید «گزینهٔ ۳» تعبیر شود)
+        labels = {f"{_to_fa(i)}. {t}": i - 1 for i, (t, _) in enumerate(kinds, 1)}
+        labels.update({t: i for i, (t, _) in enumerate(kinds)})
+        idx = labels.get(text)
+        if idx is None and _to_en(text).isdigit():
+            idx = _parse_choice(text, len(kinds))
+        if idx is None:
+            await message.answer("⚠️ لطفاً یکی از گزینه‌ها را از دکمه‌های زیر انتخاب کنید.")
+            return
+        kind = kinds[idx][1]
+        if kind == osh.KIND_ALL:
+            wip["links"] = [osh.make_link(osh.KIND_ALL)]
+            await _finish_share(message, state, wip)
+            return
+        wip.update(stage="amount", kind=kind, num=None)
+        await state.update_data(rv_share_wip=wip)
+        await _advance(message, state)
+        return
+
+    # ── ورود عدد (مقدار / صورت / مخرج)
+    if stage in ("amount", "den"):
+        value, err = osh.parse_amount(text)
+        if err:
+            await message.answer(f"⚠️ {osh.ERROR_HINTS[err]}")
+            return
+        try:
+            if stage == "amount" and wip["kind"] == osh.KIND_SAHM:
+                if value <= 0:
+                    raise ValueError("تعداد سهم باید بزرگ‌تر از صفر باشد.")
+                wip.update(stage="den", num=osh.frac_to_str(value))
+                await state.update_data(rv_share_wip=wip)
+                await _advance(message, state)
+                return
+            if stage == "den":
+                link = osh.make_link(osh.KIND_SAHM, osh.frac_from_str(wip["num"]), value)
+            else:
+                link = osh.make_link(wip["kind"], value)
+        except ValueError as e:
+            await message.answer(f"⚠️ {e}\nلطفاً دوباره وارد کنید.")
+            return
+        wip["links"].append(link)
+        wip.update(stage="scope", kind=None, num=None)
+        await state.update_data(rv_share_wip=wip)
+        await _advance(message, state)
+        return
+
+    # ── از کل ششدانگ است؟
+    if text in (_SCOPE_WHOLE, _YES, "بله"):
+        await _finish_share(message, state, wip)
+        return
+    if text in (_SCOPE_PART, _NO, "خیر"):
+        if len(wip["links"]) >= osh.MAX_LINKS:
+            await message.answer(
+                f"⚠️ حداکثر {_to_fa(osh.MAX_LINKS)} مرحله برای سهم قابل ثبت است. "
+                f"اگر مقدار آخر از کل ششدانگ است «{_SCOPE_WHOLE}» را بزنید، "
+                f"در غیر این صورت با «بازگشت» مقادیر را اصلاح کنید.")
+            return
+        wip.update(stage="type", kind=None, num=None)
+        await state.update_data(rv_share_wip=wip)
+        await _advance(message, state)
+        return
+    await message.answer("⚠️ لطفاً یکی از گزینه‌های زیر را انتخاب کنید.")
+
+
+async def _ask_share_same(message: Message, state: FSMContext):
+    d = await state.get_data()
+    await message.answer(
+        f"🏗 آیا سهم شما از *اعیانی* هم همان «{osh.format_share(d.get('rv_share_arse') or '1')}» است؟\n\n"
+        f"(در بیشتر اسناد، مقدار مالکیت برای «عرصه و اعیان» یکسان نوشته می‌شود. "
+        f"اگر مثلاً عرصه وقفی است یا سهم اعیانی جداگانه ذکر شده، «خیر» را بزنید.)",
+        reply_markup=_yes_no_kb,
+    )
+    await state.set_state(RVForm.waiting_share_same)
+
+
+@regional_value_router.message(RVForm.waiting_share_same)
+async def process_share_same(message: Message, state: FSMContext):
+    if not message.text:
+        return
+    if is_back(message.text):
+        await _go_back(message, state, "share_same")
+        return
+    if message.text in (_YES, "بله"):
+        await state.update_data(rv_share_same=True, **_step_keys(["share_aayan"]))
+    elif message.text in (_NO, "خیر"):
+        await state.update_data(rv_share_same=False)
+    else:
+        await message.answer("⚠️ لطفاً «بله» یا «خیر» را انتخاب کنید.")
+        return
+    await _advance(message, state)
+
+
+def _effective_shares(d: dict):
+    """
+    (سهم عرصه، سهم اعیانی) به‌صورت رشتهٔ کسری.
+    پرونده‌های قدیمی (قبل از این فیچر) سهم ندارند → ششدانگ.
+    """
+    land = d.get("rv_share_arse") or "1"
+    if d.get("rv_share_same") is False and d.get("rv_share_aayan"):
+        return land, d["rv_share_aayan"]
+    return land, land
+
+
+def _share_summary_lines(d: dict) -> list:
+    if not d.get("rv_share_arse"):
+        return []
+    land, bld = _effective_shares(d)
+
+    def line(label, share, links):
+        s = f"⚖️ {label}: {osh.format_share(share)}"
+        if links and _share_needs_detail(links):
+            s += f"\n     ↳ طبق سند: {osh.describe_chain(links)}"
+        return s
+
+    if not _has_bld(d):
+        return [line("سهم مالکانه", land, d.get("rv_share_arse_links"))]
+    if d.get("rv_share_same") is False:
+        return [line("سهم مالکانه عرصه", land, d.get("rv_share_arse_links")),
+                line("سهم مالکانه اعیانی", bld, d.get("rv_share_aayan_links"))]
+    return [line("سهم مالکانه (عرصه و اعیان)", land, d.get("rv_share_arse_links"))]
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -606,7 +955,7 @@ async def process_bld_structure(message: Message, state: FSMContext):
 async def _ask_bld_area(message: Message, state: FSMContext):
     await message.answer(
         "📐 لطفاً متراژ اعیانی (زیربنا) را به متر مربع وارد کنید:\n"
-        "(حداکثر برابر متراژ عرصه — مثال: 120)",
+        "(مجموع زیربنای مندرج در سند — مثال: 120)",
         reply_markup=nav_only_kb(),
     )
     await state.set_state(RVForm.waiting_bld_area)
@@ -622,13 +971,6 @@ async def process_bld_area(message: Message, state: FSMContext):
     area = _parse_number(message.text, min_value=0.01, max_value=1_000_000)
     if area is None:
         await message.answer("⚠️ متراژ نامعتبر است. لطفاً یک عدد مثبت (متر مربع) وارد کنید.")
-        return
-    land_area = (await state.get_data()).get("rv_area")
-    if land_area is not None and area > land_area:
-        await message.answer(
-            f"⚠️ متراژ اعیانی نمی‌تواند از متراژ عرصه ({land_area:,.0f} متر مربع) بیشتر باشد.\n"
-            f"لطفاً متراژ اعیانی را دوباره وارد کنید."
-        )
         return
     await state.update_data(rv_bld_area=area)
     await _advance(message, state)
@@ -775,12 +1117,75 @@ async def process_bld_age(message: Message, state: FSMContext):
     await _advance(message, state)
 
 
+# ══════════════════════════════════════════════════════════════════
+# مرحلهٔ آخر: مشخصات پلاک ثبتی (اختیاری)
+# ══════════════════════════════════════════════════════════════════
+_SKIP = "⏭ رد شدن"
+PLAK_TEMPLATE = (
+    "پلاک [عدد فرعی] فرعی از [عدد اصلی] اصلی، مفروز و مجزی‌شده از پلاک [فرعی مبدأ] فرعی از اصلی مذکور،\n"
+    "واقع در بخش [شماره بخش] ثبتی [نام شهرستان/استان]"
+)
+PLAK_MAX_LEN = 600
+_plak_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=_SKIP)], nav_row()],
+    resize_keyboard=True,
+)
+
+
+async def _ask_plak(message: Message, state: FSMContext):
+    await message.answer(
+        "🧾 *مشخصات پلاک ثبتی ملک*\n\n"
+        "لطفاً متن زیر را طبق سند مالکیت تکمیل کنید (موارد داخل [ ] را با اطلاعات سند جایگزین کنید) "
+        "و ارسال نمایید:\n\n"
+        f"{PLAK_TEMPLATE}\n\n"
+        "مثال:\n"
+        "پلاک ۱۲۳۴ فرعی از ۵۶ اصلی، مفروز و مجزی‌شده از پلاک ۱۲۰ فرعی از اصلی مذکور، "
+        "واقع در بخش ۱۱ ثبتی تهران\n\n"
+        f"در صورت تمایل نداشتن، دکمهٔ «{_SKIP}» را بزنید.",
+        reply_markup=_plak_kb,
+    )
+    await state.set_state(RVForm.waiting_plak)
+
+
+@regional_value_router.message(RVForm.waiting_plak)
+async def process_plak(message: Message, state: FSMContext):
+    if not message.text:
+        await message.answer(f"⚠️ لطفاً مشخصات پلاک را به‌صورت متن ارسال کنید یا «{_SKIP}» را بزنید.")
+        return
+    text = message.text.strip()
+    if is_back(text):
+        await _go_back(message, state, "plak")
+        return
+    if text in (_SKIP, "رد شدن", "رد"):
+        await state.update_data(rv_plak_text="")          # رشتهٔ خالی = رد شده (مرحله پاسخ داده شده)
+        await _advance(message, state)
+        return
+    if "[" in text or "]" in text:
+        await message.answer("⚠️ به نظر می‌رسد بخش‌های داخل [ ] هنوز تکمیل نشده‌اند. "
+                             "لطفاً آن‌ها را با اطلاعات سند جایگزین کنید.")
+        return
+    if len(text) < 5 or not any(ch.isdigit() for ch in text):
+        await message.answer("⚠️ متن واردشده کامل نیست؛ لطفاً شمارهٔ پلاک فرعی/اصلی و بخش ثبتی را "
+                             f"طبق نمونه وارد کنید یا «{_SKIP}» را بزنید.")
+        return
+    if len(text) > PLAK_MAX_LEN:
+        await message.answer(f"⚠️ متن بیش از حد طولانی است (حداکثر {_to_fa(PLAK_MAX_LEN)} نویسه).")
+        return
+    await state.update_data(rv_plak_text=text)
+    await _advance(message, state)
+
+
 _ASK = {
     "province": _ask_province, "address": _ask_address, "area": _ask_area,
     "land_use": _ask_land_use, "land_other": _ask_land_other,
+    "has_building": _ask_has_building,
+    "share_arse": lambda m, s: _ask_share(m, s, "arse"),
+    "share_same": _ask_share_same,
+    "share_aayan": lambda m, s: _ask_share(m, s, "aayan"),
     "bld_use": _ask_bld_use, "bld_structure": _ask_structure, "bld_area": _ask_bld_area,
     "bld_complete": _ask_complete, "bld_stage": _ask_stage, "bld_parking": _ask_parking,
     "bld_parking_area": _ask_parking_area, "bld_floor": _ask_floor, "bld_age": _ask_age,
+    "plak": _ask_plak,
 }
 
 
@@ -793,6 +1198,19 @@ def _floor_text(f) -> str:
     return "همکف" if f == 0 else (f"زیرزمین {abs(f)} (‎{f})" if f < 0 else str(f))
 
 
+def _plak_summary_lines(data: dict) -> list:
+    plak = data.get("rv_plak_text")
+    if plak is None:            # پرونده‌های قدیمی
+        return []
+    return [f"🧾 پلاک ثبتی: {plak or 'وارد نشده'}"]
+
+
+def _area_text(v) -> str:
+    """متراژ با اعشار واقعی (۱۲۰٫۵ نباید ۱۲۱ نمایش داده شود)."""
+    v = v or 0
+    return f"{v:,.2f}".rstrip("0").rstrip(".")
+
+
 def _inputs_summary(data: dict) -> str:
     """خلاصهٔ ورودی‌های کاربر (پیش‌نمایش و پیام خطای ادمین)."""
     land_use = data.get("rv_land_use") or "-"
@@ -801,11 +1219,19 @@ def _inputs_summary(data: dict) -> str:
     lines = [
         f"📍 استان: {data.get('rv_province') or '-'}",
         f"🗺 آدرس: {data.get('rv_address') or '-'}",
-        f"📐 متراژ عرصه: {(data.get('rv_area') or 0):,.0f} متر مربع",
+        f"📐 متراژ عرصه: {_area_text(data.get('rv_area'))} متر مربع",
         f"🏢 کاربری زمین: {land_use}",
+    ]
+    if data.get("rv_has_building") is False:
+        lines.append("🏗 اعیانی: ندارد")
+        lines += _share_summary_lines(data)
+        lines += _plak_summary_lines(data)
+        return "\n".join(lines)
+    lines += _share_summary_lines(data)
+    lines += [
         f"🏗 کاربری اعیانی: {ayani_calc.BUILDING_USES.get(data.get('rv_bld_use'), '-')}",
         f"🧱 نوع سازه: {ayani_calc.STRUCTURES.get(data.get('rv_bld_structure'), '-')}",
-        f"📐 متراژ اعیانی: {(data.get('rv_bld_area') or 0):,.0f} متر مربع",
+        f"📐 متراژ اعیانی: {_area_text(data.get('rv_bld_area'))} متر مربع",
     ]
     if data.get("rv_bld_complete"):
         p = data.get("rv_bld_parking_area") or 0
@@ -818,6 +1244,7 @@ def _inputs_summary(data: dict) -> str:
         stage = next((s["title"] for s in ayani_calc.CONSTRUCTION_STAGES
                       if s["key"] == data.get("rv_bld_stage")), "-")
         lines.append(f"🚧 وضعیت ساختمان: ناتمام — مرحلهٔ {stage}")
+    lines += _plak_summary_lines(data)
     return "\n".join(lines)
 
 
@@ -1276,6 +1703,34 @@ async def _system_failure(message, state, bot, user_id, refund_credit, admin_tex
     await state.clear()
 
 
+def _result_values_text(calc: dict, bold: bool = True) -> str:
+    """متن نتیجه برای کاربر؛ با سهم مالکانه، ارزش کامل (ششدانگ) هم برای شفافیت ذکر می‌شود."""
+    def money(v):
+        txt = f"{v:,} ریال"
+        return f"*{txt}*" if bold else txt
+
+    land, bld = calc["land"], calc["building"]
+    land_share = osh.frac_from_str(calc.get("land_share") or "1")
+    bld_share = osh.frac_from_str(calc.get("building_share") or "1")
+    lines = []
+    if land_share != 1:
+        lines.append(f"1️⃣ ارزش سهم عرصه: {money(calc['land_value'])}")
+        lines.append(f"     ↳ سهم مالکانه: {osh.format_share(land_share)}")
+        lines.append(f"     ↳ ارزش ششدانگ عرصه: {land['value']:,} ریال")
+    else:
+        lines.append(f"1️⃣ ارزش عرصه: {money(calc['land_value'])}")
+    if bld is None:
+        lines.append("2️⃣ ارزش اعیانی: ملک فاقد اعیانی است")
+    elif bld_share != 1:
+        lines.append(f"2️⃣ ارزش سهم اعیانی: {money(calc['building_value'])}")
+        lines.append(f"     ↳ سهم مالکانه: {osh.format_share(bld_share)}")
+        lines.append(f"     ↳ ارزش ششدانگ اعیانی: {bld['value']:,} ریال")
+    else:
+        lines.append(f"2️⃣ ارزش اعیانی: {money(calc['building_value'])}")
+    lines.append(f"3️⃣ ارزش منطقه‌ای کل: {money(calc['total'])}")
+    return "\n".join(lines)
+
+
 async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot, refund_credit: bool) -> bool:
     """اجرای استعلام؛ True فقط وقتی گزارش PDF با موفقیت به کاربر رسیده باشد."""
     user_id = message.from_user.id
@@ -1352,6 +1807,11 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
                 )
                 return
 
+            # ── وجود اعیانی و سهم مالکانه ──
+            # پرونده‌های قدیمی (قبل از سؤال «اعیانی دارد؟») همیشه اعیانی داشتند → True
+            has_building = data.get("rv_has_building") is not False
+            land_share, bld_share = _effective_shares(data)
+
             # ── اعیانی: تعیین شهرستان از روی نقشه (هرگز «یافت نشد» نمی‌دهد) ──
             geo = result.get("geocoded") or {}
             g_lat = rv_lat if rv_lat is not None else geo.get("lat")
@@ -1368,29 +1828,48 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
                     hints.append(geo["city"])
                 return ayani_calc.resolve_county(province, g_lat, g_lng, hints)
 
-            try:
-                county_info = await asyncio.wait_for(loop.run_in_executor(None, _resolve),
-                                                     timeout=_STEP_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError:
-                # بدون نام‌یابی نقشه — فقط با مختصات/مرکز استان
-                county_info = await loop.run_in_executor(
-                    None, lambda: ayani_calc.resolve_county(province, g_lat, g_lng, []))
+            async def _resolve_county():
+                try:
+                    return await asyncio.wait_for(loop.run_in_executor(None, _resolve),
+                                                  timeout=_STEP_TIMEOUT_SECONDS)
+                except asyncio.TimeoutError:
+                    # بدون نام‌یابی نقشه — فقط با مختصات/مرکز استان
+                    return await loop.run_in_executor(
+                        None, lambda: ayani_calc.resolve_county(province, g_lat, g_lng, []))
+
+            if has_building:
+                county_info = await _resolve_county()
+            else:
+                # بدون اعیانی، شهرستان فقط برای نمایش است — شکست آن نباید مانع نتیجه شود
+                try:
+                    county_info = await _resolve_county()
+                except Exception as county_err:
+                    logger.warning(f"[RV] تعیین شهرستان (بدون اعیانی) ناموفق: {county_err}")
+                    county_info = {"county": geo.get("city") or "-", "rates": None,
+                                   "method": "none", "hint": geo.get("city")}
             logger.info(f"[RV] شهرستان اعیانی: {county_info['county']} "
                         f"(روش={county_info['method']}, نقشه={county_info.get('hint')})")
 
-            building = ayani_calc.compute_building_value(
-                county_info["rates"],
-                use_key=data.get("rv_bld_use") or "residential",
-                structure=data.get("rv_bld_structure") or "concrete",
-                area=data.get("rv_bld_area") or 0,
-                complete=bool(data.get("rv_bld_complete")),
-                stage_key=data.get("rv_bld_stage") or "foundation",
-                parking_area=data.get("rv_bld_parking_area") or 0,
-                floor=data.get("rv_bld_floor"),
-                age=data.get("rv_bld_age") or 0,
-            )
-            calc = ayani_calc.compute_all(land, building)
-            land_value, building_value, total_value = land["value"], building["value"], calc["total"]
+            building = None
+            if has_building:
+                building = ayani_calc.compute_building_value(
+                    county_info["rates"],
+                    use_key=data.get("rv_bld_use") or "residential",
+                    structure=data.get("rv_bld_structure") or "concrete",
+                    area=data.get("rv_bld_area") or 0,
+                    complete=bool(data.get("rv_bld_complete")),
+                    stage_key=data.get("rv_bld_stage") or "foundation",
+                    parking_area=data.get("rv_bld_parking_area") or 0,
+                    floor=data.get("rv_bld_floor"),
+                    age=data.get("rv_bld_age") or 0,
+                )
+            calc = ayani_calc.compute_all(land, building, land_share=land_share, building_share=bld_share)
+            if _share_needs_detail(data.get("rv_share_arse_links")):
+                calc["land_share_desc"] = osh.describe_chain(data["rv_share_arse_links"])
+            bld_links = (data.get("rv_share_aayan_links") if data.get("rv_share_same") is False
+                         else data.get("rv_share_arse_links"))
+            if has_building and _share_needs_detail(bld_links):
+                calc["building_share_desc"] = osh.describe_chain(bld_links)
             # به کاربر نام شهرستانِ واقعی نقطه (از نقشه) نمایش داده می‌شود؛ اگر نرخ از
             # شهرستان همسایه گرفته شده باشد، فقط در لاگ ثبت می‌شود.
             county_label = county_info["county"]
@@ -1400,9 +1879,7 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
             await message.answer(
                 f"📊 *نتیجهٔ محاسبهٔ ارزش منطقه‌ای*\n\n"
                 f"📍 {province} — {county_label}\n\n"
-                f"1️⃣ ارزش عرصه: *{land_value:,} ریال*\n"
-                f"2️⃣ ارزش اعیانی: *{building_value:,} ریال*\n"
-                f"3️⃣ ارزش منطقه‌ای کل: *{total_value:,} ریال*",
+                f"{_result_values_text(calc, bold=True)}",
             )
 
             # ── ساخت PDF دو صفحه‌ای (صفحهٔ ۱ خلاصه، صفحهٔ ۲ نحوهٔ محاسبه) با تلاش مجدد ──
@@ -1413,7 +1890,8 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
                     pdf_ok = await asyncio.wait_for(
                         loop.run_in_executor(
                             None,
-                            lambda: _build_pdf_sync(pdf_path, province, county_label, address, tax_result, calc),
+                            lambda: _build_pdf_sync(pdf_path, province, county_label, address, tax_result, calc,
+                                            plak=data.get("rv_plak_text") or None),
                         ),
                         timeout=_STEP_TIMEOUT_SECONDS,
                     )
@@ -1446,10 +1924,8 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
                 file_path=pdf_path,
                 filename=f"ارزش_منطقه_ای_{province}.pdf",
                 caption=(
-                    f"📄 گزارش ارزش منطقه‌ای ملک (عرصه و اعیانی)\n\n"
-                    f"💰 ارزش عرصه: {land_value:,} ریال\n"
-                    f"🏗 ارزش اعیانی: {building_value:,} ریال\n"
-                    f"🧾 ارزش منطقه‌ای کل: {total_value:,} ریال"
+                    f"📄 گزارش ارزش منطقه‌ای ملک ({'عرصه و اعیانی' if has_building else 'عرصه'})\n\n"
+                    f"{_result_values_text(calc, bold=False)}"
                 ),
             )
             try:
@@ -1491,9 +1967,9 @@ def _do_query_sync(province: str, address: str, lat, lng):
     return full_pipeline(address=address, province_hint=province)
 
 
-def _build_pdf_sync(pdf_path, province, county, address, tax_result, calc):
+def _build_pdf_sync(pdf_path, province, county, address, tax_result, calc, plak=None):
     from ayani_pdf import build_ayani_pdf
     return build_ayani_pdf(
         pdf_path, province=province, county=county, address=address,
-        tax_result=tax_result, result=calc,
+        tax_result=tax_result, result=calc, plak=plak,
     )

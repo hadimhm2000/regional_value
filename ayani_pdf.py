@@ -217,8 +217,12 @@ def num_to_words(n: int) -> str:
 # ══════════════════════════════════════════════════════════════════
 # جمع‌آوری محتوا (مشترک بین همهٔ طرح‌ها)
 # ══════════════════════════════════════════════════════════════════
-def _collect(province, county, address, tax_result, result, date_text, time_text) -> dict:
-    land, b = result["land"], result["building"]
+def _collect(province, county, address, tax_result, result, date_text, time_text, plak=None) -> dict:
+    import ownership_share as osh
+    land, b = result["land"], result.get("building")
+    land_share = osh.frac_from_str(result.get("land_share") or "1")
+    bld_share = osh.frac_from_str(result.get("building_share") or "1")
+    has_share = land_share != 1 or (b is not None and bld_share != 1)
     structured = (tax_result or {}).get("فیلدهای_ساختاریافته", {}) or {}
     year = (tax_result or {}).get("سال", "1405")
 
@@ -229,6 +233,10 @@ def _collect(province, county, address, tax_result, result, date_text, time_text
     prop = [
         ("استان", province), ("شهرستان", county),
         ("آدرس", address or "—", True),
+    ]
+    if plak:
+        prop.append(("پلاک ثبتی", plak, True))
+    prop += [
         ("شماره بلوک", tax_field("شماره بلوک بر اساس دفترچه ارزش معاملاتی ملک")),
         ("شماره ردیف", tax_field("شماره ردیف بر اساس دفترچه ارزش معاملاتی ملک")),
         ("اداره کل امور مالیاتی", tax_field("اداره کل امور مالیاتی"), True),
@@ -240,41 +248,59 @@ def _collect(province, county, address, tax_result, result, date_text, time_text
         land_pairs.append(("نوع کاربری", land["land_use_title"], True))
         land_pairs.append(("ضریب تعدیل", _num(land["coef"])))
     land_pairs.append(("ارزش هر متر", f"{_money(land['unit_value'])} ریال"))
+    land_pairs.append(("سهم مالکانه", osh.format_share(land_share), True))
+    if result.get("land_share_desc") and land_share != 1:
+        land_pairs.append(("مقدار در سند", result["land_share_desc"], True))
 
-    bld = [("کاربری", b["use_title"] if b["use_key"] in ac.BUILDING_MAIN_KEYS else "سایر"),
-           ("نوع سازه", b["structure_title"])]
-    if b["use_key"] not in ac.BUILDING_MAIN_KEYS:
-        bld.append(("نوع کاربری", b["use_title"], True))
-    bld += [("متراژ اعیانی", f"{_num(b['area'])} متر مربع"),
-            ("نرخ هر متر", f"{_money(b['rate'])} ریال")]
-    if not b["complete"]:
-        bld.append(("وضعیت ساختمان", f"ناتمام — مرحلهٔ {b['stage_title']}"))
+    if b is None:
+        bld = [("اعیانی", "ملک فاقد اعیانی است", True)]
     else:
-        bld += [("وضعیت ساختمان", "تکمیل‌شده"),
-                ("پارکینگ و انباری", f"{_num(b['parking_area'])} متر مربع" if b["parking_area"] > 0 else "ندارد")]
-        if b["use_key"] in ac.BUILDING_MAIN_KEYS:
-            bld.append(("طبقه", _floor_label(b["floor"])))
-        bld.append(("قدمت", f"{_num(b['age'])} سال"))
+        bld = [("کاربری", b["use_title"] if b["use_key"] in ac.BUILDING_MAIN_KEYS else "سایر"),
+               ("نوع سازه", b["structure_title"])]
+        if b["use_key"] not in ac.BUILDING_MAIN_KEYS:
+            bld.append(("نوع کاربری", b["use_title"], True))
+        bld += [("متراژ اعیانی", f"{_num(b['area'])} متر مربع"),
+                ("نرخ هر متر", f"{_money(b['rate'])} ریال")]
+        if not b["complete"]:
+            bld.append(("وضعیت ساختمان", f"ناتمام — مرحلهٔ {b['stage_title']}"))
+        else:
+            bld += [("وضعیت ساختمان", "تکمیل‌شده"),
+                    ("پارکینگ و انباری", f"{_num(b['parking_area'])} متر مربع" if b["parking_area"] > 0 else "ندارد")]
+            if b["use_key"] in ac.BUILDING_MAIN_KEYS:
+                bld.append(("طبقه", _floor_label(b["floor"])))
+            bld.append(("قدمت", f"{_num(b['age'])} سال"))
+        bld.append(("سهم مالکانه", osh.format_share(bld_share), True))
+        if result.get("building_share_desc") and bld_share != 1:
+            bld.append(("مقدار در سند", result["building_share_desc"], True))
 
     rules = ["ارزش عرصه از سامانهٔ سازمان امور مالیاتی (ارزش معاملاتی هر متر مربع) × متراژ عرصه محاسبه شده است."]
     if land["land_use"] == "سایر":
         rules.append(f"برای کاربری‌های «سایر»، ارزش عرصه بر مبنای ارزش معاملاتی {land['base_use']} × ضریب تعدیل "
                      f"{_num(land['coef'])} محاسبه می‌شود (ضرایب: ۰٫۷، ۰٫۵، ۰٫۴، ۰٫۲، ۰٫۱).")
-    rules.append("نرخ هر متر مربع اعیانی از جدول ارزش معاملاتی ساختمان به تفکیک شهرستان، کاربری و نوع سازه (به ریال) است.")
-    if not b["complete"]:
-        rules.append("برای ساختمان ناتمام، ارزش اعیانی به نسبت مرحلهٔ ساخت منظور می‌شود: "
-                     "فونداسیون ۱۰٪، اسکلت ۳۰٪، سفت‌کاری ۵۰٪ و نازک‌کاری ۸۰٪.")
-    else:
-        if b["use_key"] in ac.BUILDING_MAIN_KEYS:
+    if b is not None:
+        rules.append("نرخ هر متر مربع اعیانی از جدول ارزش معاملاتی ساختمان به تفکیک شهرستان، کاربری و نوع سازه (به ریال) است.")
+        if not b["complete"]:
+            rules.append("برای ساختمان ناتمام، ارزش اعیانی به نسبت مرحلهٔ ساخت منظور می‌شود: "
+                         "فونداسیون ۱۰٪، اسکلت ۳۰٪، سفت‌کاری ۵۰٪ و نازک‌کاری ۸۰٪.")
+        else:
+            if b["use_key"] in ac.BUILDING_MAIN_KEYS:
+                rules += [
+                    "مسکونی و اداری بیش از پنج طبقه (بدون احتساب زیرزمین و پیلوت): از طبقهٔ ششم به بالا به ازای هر طبقه ۱٫۵٪ به نرخ هر متر افزوده می‌شود.",
+                    "تجاری: به ازای هر طبقه بالاتر یا پایین‌تر از همکف ۱۰٪ و حداکثر ۳۰٪ از نرخ هر متر کسر می‌شود.",
+                ]
             rules += [
-                "مسکونی و اداری بیش از پنج طبقه (بدون احتساب زیرزمین و پیلوت): از طبقهٔ ششم به بالا به ازای هر طبقه ۱٫۵٪ به نرخ هر متر افزوده می‌شود.",
-                "تجاری: به ازای هر طبقه بالاتر یا پایین‌تر از همکف ۱۰٪ و حداکثر ۳۰٪ از نرخ هر متر کسر می‌شود.",
+                "پارکینگ و انباری متعلق به واحد معادل ۵۰٪ نرخ هر متر مربع ساختمان محاسبه می‌شود.",
+                "به ازای هر سال قدمت تا سقف ۲۰ سال، ۲٪ (حداکثر ۴۰٪) از کل ارزش اعیانی کسر می‌شود.",
             ]
-        rules += [
-            "پارکینگ و انباری متعلق به واحد معادل ۵۰٪ نرخ هر متر مربع ساختمان محاسبه می‌شود.",
-            "به ازای هر سال قدمت تا سقف ۲۰ سال، ۲٪ (حداکثر ۴۰٪) از کل ارزش اعیانی کسر می‌شود.",
-        ]
-    rules.append("ارزش منطقه‌ای کل = ارزش عرصه + ارزش اعیانی.")
+    if has_share:
+        rules.append("ارزش هر بخش ابتدا برای کل ملک (ششدانگ) محاسبه و سپس در سهم مالکانه (کسری از ششدانگ؛ "
+                     "هر دانگ = یک‌ششم) ضرب شده است.")
+    if b is None:
+        rules.append("ملک فاقد اعیانی است؛ ارزش منطقه‌ای کل برابر ارزش عرصه است.")
+    elif has_share:
+        rules.append("ارزش منطقه‌ای کل = ارزش سهم عرصه + ارزش سهم اعیانی.")
+    else:
+        rules.append("ارزش منطقه‌ای کل = ارزش عرصه + ارزش اعیانی.")
 
     # «اطلاعات مکان انتخابی» و «ارزش معاملاتی» همان‌طور که سامانهٔ مالیاتی برگردانده
     try:
@@ -296,7 +322,13 @@ def _collect(province, county, address, tax_result, result, date_text, time_text
         "date": date_text, "time": time_text,
         "report_no": _report_no(),
         "prop": prop, "land": land_pairs, "bld": bld,
-        "land_value": land["value"], "bld_value": b["value"], "total": result["total"],
+        "land_value": result.get("land_value", land["value"]),
+        "bld_value": result.get("building_value", b["value"] if b else 0),
+        "land_label": "ارزش سهم عرصه" if land_share != 1 else "ارزش عرصه",
+        "bld_label": ("ارزش اعیانی (ندارد)" if b is None
+                      else "ارزش سهم اعیانی" if bld_share != 1 else "ارزش اعیانی"),
+        "scope_title": "عرصه و اعیانی" if b is not None else "عرصه (ملک فاقد اعیانی)",
+        "total": result["total"],
         "words": num_to_words(result["total"]),
         "steps": ac.explain_steps(result), "rules": rules,
         "disclaimer": "این گزارش بر اساس استعلام از سامانهٔ سازمان امور مالیاتی و جدول ارزش معاملاتی "
@@ -506,7 +538,7 @@ def _render_classic(ctx):
         lx = MARGIN + 2 * mm
         if doc.page == 1:
             _draw_rtl(c, rx, top - 13 * mm, "گزارش ارزش منطقه‌ای ملک", _FONTS["bold"], 18, colors.white)
-            _draw_rtl(c, rx, top - 21 * mm, f"عرصه و اعیانی — سال {ctx['year']}", _FONTS["regular"], 9.5,
+            _draw_rtl(c, rx, top - 21 * mm, f"{ctx['scope_title']} — سال {ctx['year']}", _FONTS["regular"], 9.5,
                       colors.HexColor("#C8D3E6"))
             _draw_ltr(c, lx, top - 11 * mm, f"تاریخ: {ctx['date']}", _FONTS["regular"], 8.5, colors.white)
             _draw_ltr(c, lx, top - 17 * mm, f"ساعت: {ctx['time']}", _FONTS["regular"], 8.5, colors.white)
@@ -542,8 +574,8 @@ def _render_classic(ctx):
     # جدول مبالغ
     lab_w = W * 0.55
     rows = [
-        [_p(f"{_money(ctx['land_value'])} ریال", 11, P["ink"], "bold", "left"), _p("ارزش عرصه", 10, P["ink"])],
-        [_p(f"{_money(ctx['bld_value'])} ریال", 11, P["ink"], "bold", "left"), _p("ارزش اعیانی", 10, P["ink"])],
+        [_p(f"{_money(ctx['land_value'])} ریال", 11, P["ink"], "bold", "left"), _p(ctx["land_label"], 10, P["ink"])],
+        [_p(f"{_money(ctx['bld_value'])} ریال", 11, P["ink"], "bold", "left"), _p(ctx["bld_label"], 10, P["ink"])],
         [_p(f"{_money(ctx['total'])} ریال", 15, colors.white, "bold", "left"),
          _p("ارزش منطقه‌ای کل", 12, colors.white, "bold")],
     ]
@@ -618,7 +650,7 @@ def _render_cards(ctx):
         return _box([_p(title, 10, P["accent"], "bold"), Spacer(1, 1.5 * mm)] + body, width, bg=bg, radius=6,
                     pad=4 * mm)
 
-    el = [header("گزارش ارزش منطقه‌ای ملک", f"عرصه و اعیانی — سال {ctx['year']}"), Spacer(1, 5 * mm)]
+    el = [header("گزارش ارزش منطقه‌ای ملک", f"{ctx['scope_title']} — سال {ctx['year']}"), Spacer(1, 5 * mm)]
 
     # کارت بزرگ مبلغ کل
     hero = _box([
@@ -636,8 +668,8 @@ def _render_cards(ctx):
                      _p(f"{_money(value)} ریال", 14, P["ink"], "bold", leading=20)],
                     width, bg=colors.white, radius=6, pad=4 * mm)
 
-    el.append(_row([mini("ارزش عرصه", ctx["land_value"], half), Spacer(gap, 1),
-                    mini("ارزش اعیانی", ctx["bld_value"], half)], [half, gap, half]))
+    el.append(_row([mini(ctx["land_label"], ctx["land_value"], half), Spacer(gap, 1),
+                    mini(ctx["bld_label"], ctx["bld_value"], half)], [half, gap, half]))
     el.append(Spacer(1, 4 * mm))
 
     inner = W - 8 * mm
@@ -690,7 +722,7 @@ def _render_minimal(ctx):
     def section(t):
         return [_p(t, 8.5, P["muted"], "medium"), Spacer(1, 0.5 * mm), _hr(W, P["ink"], 0.8), Spacer(1, 1 * mm)]
 
-    el = header("گزارش ارزش منطقه‌ای ملک", f"عرصه و اعیانی — سال {ctx['year']}")
+    el = header("گزارش ارزش منطقه‌ای ملک", f"{ctx['scope_title']} — سال {ctx['year']}")
 
     # اعداد اصلی
     third = W / 3
@@ -701,8 +733,8 @@ def _render_minimal(ctx):
                    leading=28 if big else 22),
                 _p("ریال", 7.5, P["muted"])]
 
-    fig = _row([figure("ارزش منطقه‌ای کل", ctx["total"], True), figure("ارزش عرصه", ctx["land_value"]),
-                figure("ارزش اعیانی", ctx["bld_value"])], [third * 1.3, third * 0.85, third * 0.85], valign="BOTTOM")
+    fig = _row([figure("ارزش منطقه‌ای کل", ctx["total"], True), figure(ctx["land_label"], ctx["land_value"]),
+                figure(ctx["bld_label"], ctx["bld_value"])], [third * 1.3, third * 0.85, third * 0.85], valign="BOTTOM")
     el += [_hr(W, P["ink"], 1.4), Spacer(1, 3 * mm), fig, Spacer(1, 2 * mm),
            _p(f"به حروف: {ctx['words']} ریال", 8.3, P["muted"]), Spacer(1, 3 * mm), _hr(W, P["line"], 0.5),
            Spacer(1, 7 * mm)]
@@ -782,14 +814,14 @@ def _render_sidebar(ctx):
     side = [
         _p("گزارش", 10, P["light"]),
         _p("ارزش منطقه‌ای ملک", 17, colors.white, "bold", leading=25),
-        _p(f"عرصه و اعیانی — سال {ctx['year']}", 8.5, P["light"]),
+        _p(f"{ctx['scope_title']} — سال {ctx['year']}", 8.5, P["light"]),
         Spacer(1, 3 * mm), _hr(sw, P["gold"], 0.8), Spacer(1, 4 * mm),
         _p(f"تاریخ: {ctx['date']}", 8.5, colors.white),
         _p(f"ساعت: {ctx['time']}", 8.5, colors.white),
         _p(f"شماره: {ctx['report_no']}", 8.5, P["gold"]),
         Spacer(1, 14 * mm),
     ]
-    for label, val in (("ارزش عرصه", ctx["land_value"]), ("ارزش اعیانی", ctx["bld_value"])):
+    for label, val in ((ctx["land_label"], ctx["land_value"]), (ctx["bld_label"], ctx["bld_value"])):
         side += [_p(label, 8.5, P["light"]), _p(_money(val), 15, colors.white, "bold", leading=22),
                  _p("ریال", 7.5, P["light"]), Spacer(1, 5 * mm)]
     side += [_hr(sw, P["gold"], 0.8), Spacer(1, 4 * mm),
@@ -846,7 +878,7 @@ DESIGNS = {"classic": _render_classic, "cards": _render_cards, "minimal": _rende
 
 def build_ayani_pdf(output_path: str, *, province: str, county: str, address: str,
                     tax_result: dict, result: dict, date_text: str = None, time_text: str = None,
-                    design: str = None) -> bool:
+                    design: str = None, plak: str = None) -> bool:
     """
     result: خروجی ayani_calc.compute_all
     tax_result: خروجی سامانهٔ مالیاتی (برای شماره بلوک/ردیف و اداره)
@@ -861,7 +893,7 @@ def build_ayani_pdf(output_path: str, *, province: str, county: str, address: st
         date_text = date_text or ""
         time_text = time_text or ""
 
-    ctx = _collect(province, county, address, tax_result, result, date_text, time_text)
+    ctx = _collect(province, county, address, tax_result, result, date_text, time_text, plak=plak)
     design = design if design in DESIGNS else DEFAULT_DESIGN
     try:
         if design == "sidebar":
