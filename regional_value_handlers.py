@@ -20,8 +20,6 @@
      (متراژ اعیانی می‌تواند از متراژ عرصه بیشتر باشد — ساختمان چندطبقه)
   ۸. پلاک ثبتی (اختیاری — قابل رد شدن)
   ۹. پیش‌نمایش (تایید / ویرایش هر مورد)
-  ۰. همان لحظهٔ زدن «استعلام ارزش منطقه‌ای»: کاربری که دسترسی ندارد (ثبت‌نشده /
-     در انتظار تایید / پایان اعتبار) فوراً پیام معرفی / انتظار / خرید اشتراک را می‌بیند
   ۱۰. دسترسی (پس از تایید پیش‌نمایش):
        کاربر رایگانِ ادمین / مشترک فعال ← استعلام
        اعتبار رایگان (تست) ← مصرف یک اعتبار و استعلام
@@ -369,48 +367,7 @@ async def regional_value_entry(message: Message, state: FSMContext):
     """شروع فرآیند استعلام (همهٔ داده‌های قبلی پاک می‌شود)."""
     await state.clear()
     await state.update_data(**{k: None for k in _ALL_KEYS}, rv_edit_snapshot=None)
-    if await _entry_access_gate(message, state):
-        return
     await _advance(message, state)
-
-
-async def _entry_access_gate(message: Message, state: FSMContext) -> bool:
-    """
-    همان لحظهٔ زدن «استعلام ارزش منطقه‌ای»: اگر کاربر دسترسی ندارد (نه تاییدشدهٔ
-    ادمین، نه اشتراک فعال، نه اعتبار رایگان)، به‌جای شروع فرم، پیام مناسب نمایش
-    داده می‌شود. True = پیام نمایش داده شد و فرم شروع نشود.
-    """
-    user_id = message.from_user.id
-    try:
-        if await _has_free_access(user_id) or await access_control.has_free_retry(user_id):
-            return False
-        status = ((await access_control.get_trial_request(user_id)) or {}).get("status")
-    except Exception as e:
-        # خطای خواندن دسترسی نباید مانع استفاده شود — بررسی نهایی بعد از پیش‌نمایش انجام می‌شود
-        logger.error(f"[RV] خطا در بررسی دسترسی ورودی کاربر {user_id}: {e}", exc_info=True)
-        return False
-
-    if status == "pending":
-        await state.set_state(RVForm.waiting_trial_approval)
-        await message.answer(
-            "⏳ درخواست تست شما ثبت شده و در انتظار تایید ادمین است؛ نتیجه در اسرع وقت اعلام می‌گردد.",
-            reply_markup=nav_only_kb(),
-        )
-    elif status == "approved":
-        # تست استفاده شده → خرید اشتراک
-        await _ask_plan(message, state, "🔔 استعلام‌های رایگان شما به پایان رسیده است.\n\n")
-    else:
-        # کاربر ثبت‌نشده (یا درخواست ردشده) → معرفی سامانه + گزینهٔ «تست»
-        await _show_intro(message, state)
-    return True
-
-
-async def _back_from_access(message: Message, state: FSMContext):
-    """«بازگشت» از مراحل دسترسی: اگر فرم پر شده → پیش‌نمایش، وگرنه → منوی اصلی."""
-    if _form_complete(await state.get_data()):
-        await _show_preview(message, state)
-    else:
-        await go_main_menu(message, state)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1700,7 +1657,7 @@ async def process_intro(message: Message, state: FSMContext):
     if not message.text:
         return
     if is_back(message.text):
-        await _back_from_access(message, state)
+        await _show_preview(message, state)
         return
     if "تست" in message.text:
         await _ask_office_code(message, state)
@@ -1790,7 +1747,7 @@ async def process_national_id(message: Message, state: FSMContext, bot: Bot):
 @regional_value_router.message(RVForm.waiting_trial_approval)
 async def process_trial_waiting(message: Message, state: FSMContext, bot: Bot):
     if message.text and is_back(message.text):
-        await _back_from_access(message, state)
+        await _show_preview(message, state)
         return
     if message.text and message.text.strip() == CONTINUE_BUTTON:
         await _start_access_flow(message, state, bot)
