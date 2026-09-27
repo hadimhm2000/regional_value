@@ -4,7 +4,8 @@
 
 فلو (همگام با پروژهٔ اصلی online.judicial.services.ble):
   ۱. انتخاب استان
-  ۲. ورود آدرس دقیق / موقعیت روی نقشه
+  ۲. آدرس: «ارسال لوکیشن» یا «وارد کردن آدرس دقیق» (با نام شهر در ابتدا) →
+     یافتن روی نقشه (نشان) → ارسال لوکیشن برای تایید کاربر → خیر: انتخاب دستی روی نقشه
   ۳. ورود متراژ عرصه
   ۴. انتخاب کاربری زمین (مسکونی/تجاری/اداری/سایر)
      ↳ سایر: ۵ زیرگزینه با ضریب تعدیل (۰٫۷/۰٫۵/۰٫۴/۰٫۲/۰٫۱)
@@ -44,6 +45,7 @@ import asyncio
 import copy
 import logging
 import os
+import re
 import tempfile
 import time
 
@@ -79,7 +81,10 @@ _STEP_TIMEOUT_SECONDS = 45
 
 class RVForm(StatesGroup):
     waiting_province = State()
-    waiting_address = State()
+    waiting_address = State()           # انتخاب روش: ارسال لوکیشن / وارد کردن آدرس دقیق
+    waiting_address_text = State()      # تایپ آدرس دقیق (با نام شهر در ابتدا)
+    waiting_address_confirm = State()   # «آیا این لوکیشن با آدرس شما یکی است؟»
+    waiting_address_location = State()  # انتخاب دستی لوکیشن روی نقشه
     waiting_area = State()
     waiting_land_use = State()
     waiting_land_other = State()        # زیرگزینهٔ «سایر» کاربری عرصه (ضریب تعدیل)
@@ -121,11 +126,29 @@ def get_main_menu_kb(user_id: int = 0):
     return main_menu_kb()
 
 
+_ADDR_LOCATION = "📍 ارسال موقعیت روی نقشه"
+_ADDR_MANUAL = "✍️ وارد کردن آدرس دقیق"
+_ADDR_OK = "✅ بله، درست است"
+_ADDR_WRONG = "❌ خیر، درست نیست"
+
+# انتخاب روش ورود آدرس
 address_or_location_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="📍 ارسال موقعیت روی نقشه", request_location=True)],
+        [KeyboardButton(text=_ADDR_LOCATION, request_location=True)],
+        [KeyboardButton(text=_ADDR_MANUAL)],
         nav_row(),
     ],
+    resize_keyboard=True,
+)
+
+# فقط ارسال لوکیشن (بعد از «خیر» یا وقتی آدرس روی نقشه پیدا نشد)
+location_only_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=_ADDR_LOCATION, request_location=True)], nav_row()],
+    resize_keyboard=True,
+)
+
+address_confirm_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=_ADDR_OK), KeyboardButton(text=_ADDR_WRONG)], nav_row()],
     resize_keyboard=True,
 )
 
@@ -235,7 +258,7 @@ async def _notify_admin(bot: Bot, text: str):
 # ══════════════════════════════════════════════════════════════════
 _STEPS = [
     ("province", ["rv_province"], lambda d: True),
-    ("address", ["rv_address", "rv_lat", "rv_lng"], lambda d: True),
+    ("address", ["rv_address", "rv_lat", "rv_lng", "rv_addr_pending"], lambda d: True),
     ("area", ["rv_area"], lambda d: True),
     ("land_use", ["rv_land_use"], lambda d: True),
     ("land_other", ["rv_land_other_idx"], lambda d: d.get("rv_land_use") == "سایر"),
@@ -396,14 +419,83 @@ async def process_province(message: Message, state: FSMContext):
 # ══════════════════════════════════════════════════════════════════
 async def _ask_address(message: Message, state: FSMContext):
     d = await state.get_data()
+    await state.update_data(rv_addr_pending=None)
     await message.answer(
         f"✅ استان: *{d.get('rv_province', '')}*\n\n"
-        f"📍 لطفاً آدرس دقیق را با ذکر نام شهر تایپ کنید،\n"
-        f"یا با دکمهٔ زیر، نقطهٔ مورد نظر را روی نقشه انتخاب و ارسال کنید:\n"
-        f"(مثال: تهران، خیابان ولیعصر، نرسیده به میدان ونک)",
+        f"📍 موقعیت ملک را چگونه اعلام می‌کنید؟\n\n"
+        f"• «{_ADDR_LOCATION}»: نقطهٔ ملک را روی نقشه انتخاب و ارسال کنید\n"
+        f"• «{_ADDR_MANUAL}»: آدرس را تایپ کنید؛ ربات آن را روی نقشه پیدا می‌کند و برای تایید شما می‌فرستد",
         reply_markup=address_or_location_kb,
     )
     await state.set_state(RVForm.waiting_address)
+
+
+async def _ask_address_text(message: Message, state: FSMContext):
+    d = await state.get_data()
+    province = d.get("rv_province", "")
+    example_city = ayani_calc.PROVINCE_CAPITALS.get(province, "تهران")
+    await message.answer(
+        "✍️ لطفاً آدرس دقیق ملک را تایپ کنید.\n\n"
+        "⚠️ آدرس حتماً باید با *نام شهر* شروع شود.\n"
+        f"مثال: {example_city}، خیابان ...، کوچه ...، پلاک ...",
+        reply_markup=nav_only_kb(),
+    )
+    await state.set_state(RVForm.waiting_address_text)
+
+
+async def _ask_manual_location(message: Message, state: FSMContext, reason: str = ""):
+    await message.answer(
+        (reason + "\n\n" if reason else "")
+        + f"📍 لطفاً خودتان موقعیت دقیق ملک را روی نقشه انتخاب کنید و با دکمهٔ «{_ADDR_LOCATION}» ارسال نمایید.",
+        reply_markup=location_only_kb,
+    )
+    await state.set_state(RVForm.waiting_address_location)
+
+
+def _norm_txt(s: str) -> str:
+    s = str(s or "").replace("ي", "ی").replace("ك", "ک").replace("‌", " ")
+    s = s.replace("‏", "").replace("‎", "")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _strip_city_prefix(s: str) -> str:
+    return re.sub(r"^(استان|شهرستان|شهر)\s+", "", s)
+
+
+def _starts_with_name(address: str, name: str) -> bool:
+    """آیا آدرس با این نام شروع می‌شود؟ (فاصله/نیم‌فاصله درون نام اختیاری است: اسلامشهر = اسلام‌شهر)"""
+    a = _strip_city_prefix(_norm_txt(address))
+    n = _strip_city_prefix(_norm_txt(name)).replace(" ", "")
+    if not n:
+        return False
+    pattern = r"\s?".join(map(re.escape, n)) + r"(?=$|[\s،,\-–:.()؛;/])"
+    return re.match(pattern, a) is not None
+
+
+_STREET_START = re.compile(
+    r"^(خیابان|خ\.|کوچه|ک\.|بلوار|بزرگراه|اتوبان|میدان|م\.|چهارراه|سه ?راه|کوی|محله|شهرک|پلاک|بن ?بست|جاده|روستا)(?=$|[\s،,.])"
+)
+
+
+def _city_at_start(address: str, province: str):
+    """نام شهر ابتدای آدرس را از بین شهرستان‌های همان استان پیدا می‌کند (یا None)."""
+    names = []
+    try:
+        names = [c["county"] for c in ayani_calc._province_counties(province)]
+    except Exception:
+        pass
+    names += [ayani_calc.PROVINCE_CAPITALS.get(province, ""), province]
+    for name in sorted({n for n in names if n}, key=len, reverse=True):
+        if _starts_with_name(address, name):
+            return name
+    return None
+
+
+def _same_province(geo_province, province) -> bool:
+    if not geo_province:
+        return True  # نامشخص → رد نکن
+    return ayani_calc.normalize_name(_strip_city_prefix(_norm_txt(geo_province))) == \
+        ayani_calc.normalize_name(province)
 
 
 @regional_value_router.message(RVForm.waiting_address, F.content_type == "text")
@@ -413,33 +505,146 @@ async def process_address(message: Message, state: FSMContext):
     if is_back(message.text):
         await _go_back(message, state, "address")
         return
-    address = message.text.strip()
-    if len(address) < 5:
-        await message.answer("⚠️ آدرس بسیار کوتاه است. لطفاً آدرس دقیق‌تری وارد کنید.")
+    if message.text.strip() == _ADDR_MANUAL:
+        await _ask_address_text(message, state)
         return
-    await state.update_data(rv_address=address, rv_lat=None, rv_lng=None)
-    await message.answer("✅ آدرس ثبت شد.")
-    await _advance(message, state)
+    if message.text.strip() == _ADDR_LOCATION:
+        await message.answer("📍 لطفاً روی دکمهٔ «ارسال موقعیت» بزنید و نقطهٔ ملک را روی نقشه انتخاب کنید.",
+                             reply_markup=address_or_location_kb)
+        return
+    # آدرسی که مستقیماً (بدون زدن دکمه) تایپ شده هم همان مسیر «آدرس دقیق» را طی می‌کند
+    await process_address_text(message, state)
+
+
+@regional_value_router.message(RVForm.waiting_address_text, F.content_type == "text")
+async def process_address_text(message: Message, state: FSMContext):
+    if not message.text:
+        return
+    if is_back(message.text):
+        await _ask_address(message, state)
+        return
+    address = _norm_txt(message.text)
+    if len(address) < 8:
+        await message.answer("⚠️ آدرس بسیار کوتاه است. لطفاً آدرس دقیق را با نام شهر در ابتدا وارد کنید.")
+        await state.set_state(RVForm.waiting_address_text)
+        return
+
+    province = (await state.get_data()).get("rv_province", "")
+    city = _city_at_start(address, province)
+    example_city = ayani_calc.PROVINCE_CAPITALS.get(province, "تهران")
+    no_city_msg = ("⚠️ ابتدای آدرس باید *نام شهر* باشد.\n"
+                   f"لطفاً آدرس را دوباره وارد کنید؛ مثال: {example_city}، خیابان ...، کوچه ...")
+
+    # آدرسی که با خیابان/کوچه/... شروع شده قطعاً نام شهر ندارد → بدون معطلی و بدون استعلام نقشه
+    if city is None and _STREET_START.match(address):
+        await message.answer(no_city_msg, reply_markup=nav_only_kb())
+        await state.set_state(RVForm.waiting_address_text)
+        return
+
+    await message.answer("🔎 در حال یافتن آدرس روی نقشه...")
+    geo = None
+    try:
+        from geocode_and_query import geocode_address
+        loop = asyncio.get_running_loop()
+        geo = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: geocode_address(address, city=city, province=province)),
+            timeout=20,
+        )
+    except Exception as e:
+        logger.warning(f"[RV] geocode آدرس ناموفق ({address}): {e}")
+
+    # شهرهای کوچک‌تر (غیر مرکز شهرستان) از روی نتیجهٔ نقشه تایید می‌شوند
+    if city is None and geo and geo.get("city") and _starts_with_name(address, geo["city"]):
+        city = geo["city"]
+
+    if city is None:
+        await message.answer(no_city_msg, reply_markup=nav_only_kb())
+        await state.set_state(RVForm.waiting_address_text)
+        return
+
+    if not geo:
+        await state.update_data(rv_addr_pending={"address": address})
+        await _ask_manual_location(message, state, "⚠️ آدرس واردشده روی نقشه پیدا نشد.")
+        return
+
+    if not _same_province(geo.get("province"), province):
+        await message.answer(
+            f"⚠️ این آدرس روی نقشه در استان «{geo.get('province')}» پیدا شد، نه «{province}».\n"
+            f"لطفاً آدرس را اصلاح کنید یا با «بازگشت» موقعیت را روی نقشه ارسال کنید.",
+            reply_markup=nav_only_kb(),
+        )
+        await state.set_state(RVForm.waiting_address_text)
+        return
+
+    await state.update_data(rv_addr_pending={"address": address, "lat": geo["lat"], "lng": geo["lng"]})
+    try:
+        await message.answer_location(latitude=geo["lat"], longitude=geo["lng"])
+    except Exception as e:
+        logger.warning(f"[RV] ارسال لوکیشن به کاربر ناموفق: {e}")
+    await message.answer(
+        f"🗺 موقعیت بالا از روی آدرس شما روی نقشه پیدا شد:\n📍 {address}\n\n"
+        f"آیا این لوکیشن با آدرس ملک شما یکی است؟",
+        reply_markup=address_confirm_kb,
+    )
+    await state.set_state(RVForm.waiting_address_confirm)
+
+
+@regional_value_router.message(RVForm.waiting_address_confirm, F.content_type == "text")
+async def process_address_confirm(message: Message, state: FSMContext):
+    if not message.text:
+        return
+    text = message.text.strip()
+    if is_back(text):
+        await _ask_address_text(message, state)
+        return
+    pending = (await state.get_data()).get("rv_addr_pending") or {}
+    if text in (_ADDR_OK, _YES, "بله") and pending.get("lat") is not None:
+        await state.update_data(rv_address=pending["address"], rv_lat=pending["lat"],
+                                rv_lng=pending["lng"], rv_addr_pending=None)
+        await message.answer("✅ آدرس و موقعیت ملک ثبت شد.")
+        await _advance(message, state)
+        return
+    if text in (_ADDR_WRONG, _NO, "خیر"):
+        await _ask_manual_location(message, state)
+        return
+    await message.answer("⚠️ لطفاً یکی از گزینه‌های «بله» یا «خیر» را انتخاب کنید.", reply_markup=address_confirm_kb)
+
+
+@regional_value_router.message(RVForm.waiting_address_location, F.content_type == "text")
+async def process_address_location_text(message: Message, state: FSMContext):
+    if not message.text:
+        return
+    if is_back(message.text):
+        await _ask_address(message, state)
+        return
+    await message.answer(f"📍 لطفاً موقعیت ملک را با دکمهٔ «{_ADDR_LOCATION}» روی نقشه انتخاب و ارسال کنید.",
+                         reply_markup=location_only_kb)
 
 
 @regional_value_router.message(RVForm.waiting_address, F.content_type == "location")
+@regional_value_router.message(RVForm.waiting_address_text, F.content_type == "location")
+@regional_value_router.message(RVForm.waiting_address_confirm, F.content_type == "location")
+@regional_value_router.message(RVForm.waiting_address_location, F.content_type == "location")
 async def process_address_location(message: Message, state: FSMContext):
-    """کاربر به‌جای تایپ آدرس، نقطه‌ای را روی نقشه انتخاب و ارسال کرده است."""
+    """کاربر نقطه‌ای را روی نقشه انتخاب و ارسال کرده است (مستقیم یا بعد از «خیر»)."""
     lat, lng = message.location.latitude, message.location.longitude
-    # آدرس‌خوانی معکوس فقط برای نمایش — استعلام مستقیماً روی مختصات انجام می‌شود.
-    try:
-        from geocode_and_query import reverse_geocode
-        loop = asyncio.get_running_loop()
-        display_address = await asyncio.wait_for(
-            loop.run_in_executor(None, reverse_geocode, lat, lng), timeout=15,
-        )
-    except Exception as e:
-        logger.warning(f"[RV] reverse_geocode ناموفق: {e}")
-        display_address = None
+    pending = (await state.get_data()).get("rv_addr_pending") or {}
+    display_address = pending.get("address")  # آدرس تایپ‌شدهٔ کاربر (اگر قبلاً وارد کرده)
+    if not display_address:
+        # آدرس‌خوانی معکوس فقط برای نمایش — استعلام مستقیماً روی مختصات انجام می‌شود.
+        try:
+            from geocode_and_query import reverse_geocode
+            loop = asyncio.get_running_loop()
+            display_address = await asyncio.wait_for(
+                loop.run_in_executor(None, reverse_geocode, lat, lng), timeout=15,
+            )
+        except Exception as e:
+            logger.warning(f"[RV] reverse_geocode ناموفق: {e}")
+            display_address = None
     if not display_address:
         display_address = f"مختصات انتخاب‌شده روی نقشه ({lat:.6f}, {lng:.6f})"
 
-    await state.update_data(rv_address=display_address, rv_lat=lat, rv_lng=lng)
+    await state.update_data(rv_address=display_address, rv_lat=lat, rv_lng=lng, rv_addr_pending=None)
     await message.answer(f"✅ موقعیت مکانی دریافت شد.\n📍 {display_address}")
     await _advance(message, state)
 
