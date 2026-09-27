@@ -8,9 +8,9 @@
   ۳. ورود متراژ عرصه
   ۴. انتخاب کاربری زمین (مسکونی/تجاری/اداری/سایر)
      ↳ سایر: ۵ زیرگزینه با ضریب تعدیل (۰٫۷/۰٫۵/۰٫۴/۰٫۲/۰٫۱)
-  ۵. ملک اعیانی دارد؟ (بله/خیر)
-  ۶. سهم مالکانه (ownership_share): ششدانگ / دانگ / سهم از سهم / درصد
+  ۵. سهم مالکانه عرصه (ownership_share): ششدانگ / دانگ / سهم از سهم / درصد
      ↳ «از کل ششدانگ است؟» خیر → حلقهٔ بعدی زنجیره (مثل «۲ سهم از ۴۸ سهم از ۳ دانگ»)
+  ۶. ملک اعیانی دارد؟ (بله/خیر)
      ↳ اگر اعیانی دارد: «سهم اعیانی همان سهم عرصه است؟» خیر → سهم اعیانی جداگانه
   ۷. اعیانی (فقط اگر دارد): کاربری (مسکونی/تجاری/اداری/سایر ← صنعتی/کشاورزی) →
      نوع سازه → متراژ → تکمیل شده؟
@@ -239,9 +239,9 @@ _STEPS = [
     ("area", ["rv_area"], lambda d: True),
     ("land_use", ["rv_land_use"], lambda d: True),
     ("land_other", ["rv_land_other_idx"], lambda d: d.get("rv_land_use") == "سایر"),
-    ("has_building", ["rv_has_building"], lambda d: True),
-    # سهم مالکانه — rv_share_wip: وضعیت موقت زیرفلوی ورود سهم (با پاک شدن مرحله پاک می‌شود)
+    # سهم مالکانه عرصه — rv_share_wip: وضعیت موقت زیرفلوی ورود سهم (با پاک شدن مرحله پاک می‌شود)
     ("share_arse", ["rv_share_arse", "rv_share_arse_links", "rv_share_wip"], lambda d: True),
+    ("has_building", ["rv_has_building"], lambda d: True),
     ("share_same", ["rv_share_same"], _has_bld),
     ("share_aayan", ["rv_share_aayan", "rv_share_aayan_links", "rv_share_wip"],
      lambda d: _has_bld(d) and d.get("rv_share_same") is False),
@@ -269,8 +269,8 @@ _EDIT_FIELDS = [
     ("آدرس / موقعیت روی نقشه", ["address"], lambda d: True),
     ("متراژ عرصه", ["area"], lambda d: True),
     ("کاربری زمین", ["land_use", "land_other"], lambda d: True),
-    ("وجود اعیانی", ["has_building"], lambda d: True),
     ("سهم مالکانه", ["share_arse", "share_same", "share_aayan"], lambda d: True),
+    ("وجود اعیانی", ["has_building"], lambda d: True),
     ("کاربری اعیانی", ["bld_use"], _has_bld),
     ("نوع سازه", ["bld_structure"], _has_bld),
     ("متراژ اعیانی", ["bld_area"], _has_bld),
@@ -536,13 +536,13 @@ async def process_land_other(message: Message, state: FSMContext):
 
 
 # ══════════════════════════════════════════════════════════════════
-# مرحلهٔ ۵-الف: ملک اعیانی دارد؟
+# مرحلهٔ ۵-ب: ملک اعیانی دارد؟ (بعد از سهم مالکانه عرصه)
 # ══════════════════════════════════════════════════════════════════
 async def _ask_has_building(message: Message, state: FSMContext):
     await message.answer(
         "🏗 آیا ملک دارای *اعیانی* (ساختمان / بنا) است؟\n\n"
-        "• بله: سهم مالکانه و مشخصات اعیانی پرسیده می‌شود\n"
-        "• خیر: پس از تعیین سهم مالکانه، مستقیماً به محاسبه می‌رود (فقط ارزش عرصه)",
+        "• بله: سهم اعیانی و مشخصات ساختمان پرسیده می‌شود\n"
+        "• خیر: مستقیماً به محاسبه می‌رود (فقط ارزش عرصه)",
         reply_markup=_yes_no_kb,
     )
     await state.set_state(RVForm.waiting_has_building)
@@ -568,7 +568,7 @@ async def process_has_building(message: Message, state: FSMContext):
 
 
 # ══════════════════════════════════════════════════════════════════
-# مرحلهٔ ۵-ب: سهم مالکانه (زیرفلوی چندمرحله‌ای — ownership_share)
+# مرحلهٔ ۵-الف و ۵-ج: سهم مالکانه (زیرفلوی چندمرحله‌ای — ownership_share)
 #
 #  rv_share_wip = {"target": "arse"|"aayan", "links": [...], "stage": ..., "kind": ..., "num": ...}
 #    stage: type   → انتخاب نوع (ششدانگ / دانگ / سهم از سهم / درصد)

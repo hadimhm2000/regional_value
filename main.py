@@ -13,6 +13,7 @@
 
 import asyncio
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from aiogram import Bot, Dispatcher
@@ -43,6 +44,25 @@ session = AiohttpSession(api=custom_api_server)
 bot = Bot(token=BOT_TOKEN, session=session)
 
 dp = Dispatcher(storage=MemoryStorage())
+
+# ═══ لاگ کندی: هر آپدیتی که پردازشش بیش از SLOW_UPDATE_SECONDS طول بکشد ثبت می‌شود ═══
+SLOW_UPDATE_SECONDS = 2.0
+
+
+@dp.update.outer_middleware()
+async def _timing_middleware(handler, event, data):
+    started = time.perf_counter()
+    try:
+        return await handler(event, data)
+    finally:
+        elapsed = time.perf_counter() - started
+        if elapsed >= SLOW_UPDATE_SECONDS:
+            msg = getattr(event, "message", None)
+            user = getattr(getattr(msg, "from_user", None), "id", "-")
+            text = (getattr(msg, "text", None) or "")[:30]
+            state = data.get("raw_state")
+            logger.warning(f"[SLOW] {elapsed:.1f}s | user={user} | state={state} | text={text!r}")
+
 dp.include_router(admin_router)
 dp.include_router(regional_value_router)
 
