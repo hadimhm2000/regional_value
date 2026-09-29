@@ -28,6 +28,7 @@ from config import BOT_TOKEN, BALE_API_BASE, ADMIN_ID, NESHAN_API_KEY, EXECUTOR_
 from regional_value_handlers import regional_value_router, regional_value_entry
 from admin_commands import admin_router
 from keyboards import main_menu_kb, is_main_menu_button
+from bale_retry import BaleRetryMiddleware, is_transient_error
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -41,6 +42,8 @@ if not NESHAN_API_KEY:
 # ═══ Bot با آدرس اختصاصی بله (نه تلگرام) ═══
 custom_api_server = TelegramAPIServer.from_base(BALE_API_BASE)
 session = AiohttpSession(api=custom_api_server)
+# خطاهای موقت بله (5xx / Connection refused) خودکار چند بار تکرار می‌شوند
+session.middleware(BaleRetryMiddleware())
 bot = Bot(token=BOT_TOKEN, session=session)
 
 dp = Dispatcher(storage=MemoryStorage())
@@ -84,9 +87,15 @@ async def start_regional_value(message: Message, state: FSMContext):
 # ═══ هندلر خطای سراسری — هیچ استثنایی نباید کل ربات را متوقف کند ═══
 @dp.errors()
 async def global_error_handler(event: ErrorEvent):
+    exc = event.exception
+    if is_transient_error(exc):
+        # قطعی/خطای لحظه‌ای سرور بله حتی پس از تلاش‌های مجدد — باگ ربات نیست؛
+        # فقط لاگ می‌شود و پیام «خطای سراسری» برای ادمین ارسال نمی‌شود.
+        logger.warning(f"[GLOBAL] خطای موقت بله پس از تلاش مجدد: {type(exc).__name__}: {exc}")
+        return True
     logger.error(
-        f"[GLOBAL] خطای گرفته‌نشده در هندلینگ آپدیت: {event.exception}",
-        exc_info=event.exception,
+        f"[GLOBAL] خطای گرفته‌نشده در هندلینگ آپدیت: {exc}",
+        exc_info=exc,
     )
     if ADMIN_ID:
         try:

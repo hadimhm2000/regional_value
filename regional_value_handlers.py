@@ -2124,72 +2124,41 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
             if county_info["method"] != "name" and county_info.get("hint"):
                 county_label = county_info["hint"].replace("شهرستان ", "").strip()
 
-            await message.answer(
+            # خطای لحظه‌ای ارسال این پیام نباید مانع ساخت/ارسال PDF شود (کپشن PDF هم مقادیر را دارد)
+            await _safe_send(
+                bot, user_id,
                 f"📊 *نتیجهٔ محاسبهٔ ارزش منطقه‌ای*\n\n"
                 f"📍 {province} — {county_label}\n\n"
                 f"{_result_values_text(calc, bold=True)}",
             )
 
-            # ── ساخت PDF دو صفحه‌ای (صفحهٔ ۱ خلاصه، صفحهٔ ۲ نحوهٔ محاسبه) با تلاش مجدد ──
-            pdf_path = os.path.join(tempfile.gettempdir(), f"regional_value_{user_id}_{int(time.time())}.pdf")
-            pdf_ok = False
-            for attempt in (1, 2):
-                try:
-                    pdf_ok = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None,
-                            lambda: _build_pdf_sync(pdf_path, province, county_label, address, tax_result, calc,
-                                            plak=data.get("rv_plak_text") or None),
-                        ),
-                        timeout=_STEP_TIMEOUT_SECONDS,
-                    )
-                    if pdf_ok:
-                        break
-                except Exception as e:
-                    logger.error(f"[RV] خطا در تلاش {attempt} ساخت PDF برای کاربر {user_id}: {e}", exc_info=True)
-                if attempt == 1:
-                    await asyncio.sleep(1)
-
-            if not pdf_ok or not os.path.exists(pdf_path):
-                # فال‌بک متنی — نحوهٔ محاسبه به‌صورت متن، تا کاربر دست‌خالی نماند
-                steps = ayani_calc.explain_steps(calc)
-                steps_text = "\n".join(
-                    f"• {t}: {f'{a:,} ریال' if a is not None else ''}" + (f"\n   {f}" if f else "")
-                    for t, f, a in steps
-                )
-                await message.answer(f"🧮 *نحوهٔ محاسبه*\n\n{steps_text}")
-                await _system_failure(
-                    message, state, bot, user_id, refund_credit,
-                    f"🛑 ساخت PDF برای کاربر {user_id} شکست خورد.\n{_inputs_summary(data)}",
-                    "⚠️ خطا در ساخت فایل گزارش PDF (نتیجه به‌صورت متنی ارسال شد). "
-                    "برای دریافت فایل، لطفاً *۳۰ دقیقه دیگر* دوباره تلاش کنید.",
-                )
-                return
-
-            # ── ارسال مستقیم PDF (نه FSInputFile) ──
-            sent = await send_document_direct(
-                chat_id=user_id,
-                file_path=pdf_path,
-                filename=f"ارزش_منطقه_ای_{province}.pdf",
-                caption=(
-                    f"📄 گزارش ارزش منطقه‌ای ملک ({'عرصه و اعیانی' if has_building else 'عرصه'})\n\n"
-                    f"{_result_values_text(calc, bold=False)}"
-                ),
-            )
-            try:
-                os.remove(pdf_path)
-            except Exception:
-                pass
-
-            if sent:
-                await message.answer("بازگشت به منوی اصلی.", reply_markup=get_main_menu_kb(user_id))
+            # ── ساخت و ارسال PDF؛ در صورت شکست، با همان اطلاعات هر یک دقیقه دوباره ──
+            job = {
+                "user_id": user_id,
+                "province": province,
+                "county": county_label,
+                "address": address,
+                "tax_result": copy.deepcopy(tax_result),
+                "calc": copy.deepcopy(calc),
+                "plak": data.get("rv_plak_text") or None,
+                "has_building": has_building,
+                "inputs_summary": _inputs_summary(data),
+                "refund_credit": refund_credit,
+            }
+            if await _build_and_send_pdf(bot, job):
+                await _safe_send(bot, user_id, "بازگشت به منوی اصلی.", reply_markup=get_main_menu_kb(user_id))
                 return True
-            else:
-                await _system_failure(
-                    message, state, bot, user_id, refund_credit,
-                    f"🛑 ارسال فایل PDF برای کاربر {user_id} شکست خورد (بعد از تلاش مجدد داخلی).",
-                    "⚠️ گزارش ساخته شد ولی ارسال فایل ناموفق بود. لطفاً *۳۰ دقیقه دیگر* دوباره تلاش کنید.",
-                )
+
+            _schedule_pdf_retry(bot, job)
+            await _safe_send(
+                bot, user_id,
+                "⏳ فایل PDF گزارش به‌دلیل اختلال لحظه‌ای آماده نشد.\n"
+                "📄 *تا یک دقیقهٔ دیگر* فایل با همین اطلاعات به‌صورت خودکار برای شما ارسال می‌شود؛ "
+                "نیازی به استعلام مجدد نیست.",
+                reply_markup=get_main_menu_kb(user_id),
+            )
+            # اعتبار مصرف‌شده برمی‌گردد فقط اگر همهٔ تلاش‌های بعدی هم شکست بخورد
+            return True
 
         except Exception as e:
             # سپر نهایی: هیچ خطای پیش‌بینی‌نشده‌ای نباید کل ربات را کرش کند
@@ -2204,6 +2173,130 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
                 pass
         finally:
             await state.clear()
+
+
+# ══════════════════════════════════════════════════════════════════
+# ساخت/ارسال PDF + تلاش مجدد خودکار در پس‌زمینه (هر یک دقیقه، با همان اطلاعات)
+# ══════════════════════════════════════════════════════════════════
+_PDF_RETRY_DELAY_SECONDS = 60
+_PDF_RETRY_MAX_ATTEMPTS = 10  # حداکثر ~۱۰ دقیقه
+_pending_pdf_tasks: set = set()  # نگه‌داشتن ارجاع تا task توسط GC حذف نشود
+
+
+async def _safe_send(bot: Bot, chat_id: int, text: str, **kwargs) -> bool:
+    """ارسال پیام بدون این‌که خطای شبکه جریان اصلی را بشکند."""
+    try:
+        await bot.send_message(chat_id, text, **kwargs)
+        return True
+    except Exception as e:
+        logger.warning(f"[RV] ارسال پیام به {chat_id} ناموفق: {type(e).__name__}: {e}")
+        return False
+
+
+async def _build_and_send_pdf(bot: Bot, job: dict) -> bool:
+    """ساخت PDF (با یک تلاش مجدد) و ارسال آن؛ True فقط وقتی فایل به کاربر رسیده باشد."""
+    user_id = job["user_id"]
+    loop = asyncio.get_running_loop()
+    pdf_path = os.path.join(
+        tempfile.gettempdir(), f"regional_value_{user_id}_{time.time_ns()}.pdf"
+    )
+    try:
+        pdf_ok = False
+        for attempt in (1, 2):
+            try:
+                pdf_ok = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: _build_pdf_sync(
+                            pdf_path, job["province"], job["county"], job["address"],
+                            job["tax_result"], job["calc"], plak=job["plak"],
+                        ),
+                    ),
+                    timeout=_STEP_TIMEOUT_SECONDS,
+                )
+                if pdf_ok and os.path.exists(pdf_path):
+                    break
+                pdf_ok = False
+            except Exception as e:
+                job["last_error"] = f"ساخت PDF: {type(e).__name__}: {e}"
+                logger.error(f"[RV] خطا در تلاش {attempt} ساخت PDF برای کاربر {user_id}: {e}", exc_info=True)
+            if attempt == 1:
+                await asyncio.sleep(1)
+        if not pdf_ok:
+            job.setdefault("last_error", "ساخت PDF ناموفق بود")
+            return False
+
+        sent = await send_document_direct(
+            chat_id=user_id,
+            file_path=pdf_path,
+            filename=f"ارزش_منطقه_ای_{job['province']}.pdf",
+            caption=(
+                f"📄 گزارش ارزش منطقه‌ای ملک ({'عرصه و اعیانی' if job['has_building'] else 'عرصه'})\n\n"
+                f"{_result_values_text(job['calc'], bold=False)}"
+            ),
+        )
+        if not sent:
+            job["last_error"] = "ارسال فایل به بله ناموفق بود"
+        return sent
+    finally:
+        try:
+            os.remove(pdf_path)
+        except Exception:
+            pass
+
+
+def _schedule_pdf_retry(bot: Bot, job: dict) -> None:
+    task = asyncio.create_task(_pdf_retry_worker(bot, job))
+    _pending_pdf_tasks.add(task)
+    task.add_done_callback(_pending_pdf_tasks.discard)
+    logger.info(f"[RV] ارسال PDF کاربر {job['user_id']} برای یک دقیقهٔ بعد زمان‌بندی شد "
+                f"({job.get('last_error', '-')})")
+
+
+async def _pdf_retry_worker(bot: Bot, job: dict) -> None:
+    user_id = job["user_id"]
+    try:
+        for attempt in range(1, _PDF_RETRY_MAX_ATTEMPTS + 1):
+            await asyncio.sleep(_PDF_RETRY_DELAY_SECONDS)
+            logger.info(f"[RV] تلاش مجدد {attempt}/{_PDF_RETRY_MAX_ATTEMPTS} ارسال PDF برای کاربر {user_id}")
+            try:
+                if await _build_and_send_pdf(bot, job):
+                    logger.info(f"[RV] PDF کاربر {user_id} در تلاش پس‌زمینهٔ {attempt} ارسال شد")
+                    return
+            except Exception as e:
+                job["last_error"] = f"{type(e).__name__}: {e}"
+                logger.error(f"[RV] خطا در تلاش پس‌زمینهٔ ارسال PDF برای {user_id}: {e}", exc_info=True)
+    except asyncio.CancelledError:
+        return
+
+    # ── همهٔ تلاش‌ها شکست خورد: نحوهٔ محاسبه به‌صورت متن + اطلاع ادمین + بازگرداندن اعتبار ──
+    logger.error(f"[RV] ارسال PDF کاربر {user_id} پس از {_PDF_RETRY_MAX_ATTEMPTS} تلاش پس‌زمینه شکست خورد")
+    await _notify_admin(
+        bot,
+        f"🛑 ارسال PDF برای کاربر {user_id} پس از {_PDF_RETRY_MAX_ATTEMPTS} تلاش (هر یک دقیقه) شکست خورد.\n"
+        f"آخرین خطا: {job.get('last_error', '-')}\n{job['inputs_summary']}",
+    )
+    refund = job["refund_credit"]
+    if refund:
+        try:
+            await access_control.grant_free_retry(user_id)
+        except Exception as e:
+            logger.error(f"[RV] خطا در بازگرداندن اعتبار رایگان برای {user_id}: {e}")
+    try:
+        steps = ayani_calc.explain_steps(job["calc"])
+        steps_text = "\n".join(
+            f"• {t}: {f'{a:,} ریال' if a is not None else ''}" + (f"\n   {f}" if f else "")
+            for t, f, a in steps
+        )
+        await _safe_send(bot, user_id, f"🧮 *نحوهٔ محاسبه*\n\n{steps_text}")
+    except Exception as e:
+        logger.error(f"[RV] خطا در ساخت متن نحوهٔ محاسبه برای {user_id}: {e}")
+    await _safe_send(
+        bot, user_id,
+        "⚠️ متأسفانه ارسال فایل PDF گزارش ممکن نشد (نتیجه و نحوهٔ محاسبه به‌صورت متنی ارسال شد). "
+        "موضوع به پشتیبانی اطلاع داده شد." + (_REFUND_NOTE if refund else ""),
+        reply_markup=get_main_menu_kb(user_id),
+    )
 
 
 def _do_query_sync(province: str, address: str, lat, lng):
