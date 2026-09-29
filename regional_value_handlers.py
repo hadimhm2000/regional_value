@@ -1938,7 +1938,7 @@ async def rv_payment_step_nav(message: Message, state: FSMContext):
 _REFUND_NOTE = "\n💚 اعتبار استعلام رایگان شما بازگردانده شد."
 
 
-async def _system_failure(message, state, bot, user_id, refund_credit, admin_text, user_text):
+async def _system_failure(bot, user_id, refund_credit, admin_text, user_text):
     """خطای سیستمی: اطلاع به ادمین + بازگرداندن اعتبار مصرف‌شده + پیام به کاربر."""
     await _notify_admin(bot, admin_text)
     if refund_credit:
@@ -1946,9 +1946,8 @@ async def _system_failure(message, state, bot, user_id, refund_credit, admin_tex
             await access_control.grant_free_retry(user_id)
         except Exception as e:
             logger.error(f"[RV] خطا در بازگرداندن اعتبار رایگان برای {user_id}: {e}")
-    await message.answer(user_text + (_REFUND_NOTE if refund_credit else ""),
-                         reply_markup=get_main_menu_kb(user_id))
-    await state.clear()
+    await _safe_send(bot, user_id, user_text + (_REFUND_NOTE if refund_credit else ""),
+                     reply_markup=get_main_menu_kb(user_id))
 
 
 def _result_values_text(calc: dict, bold: bool = True) -> str:
@@ -1980,199 +1979,219 @@ def _result_values_text(calc: dict, bold: bool = True) -> str:
 
 
 async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot, refund_credit: bool) -> bool:
-    """اجرای استعلام؛ True فقط وقتی گزارش PDF با موفقیت به کاربر رسیده باشد."""
-    user_id = message.from_user.id
-    data = await state.get_data()
+    """اجرای استعلام.
 
+    True وقتی گزارش به کاربر رسیده یا (به‌خاطر اختلال لحظه‌ای سامانهٔ مالیات/بله)
+    برای یک دقیقهٔ بعد با همان اطلاعات زمان‌بندی شده است.
+    """
+    user_id = message.from_user.id
+    data = copy.deepcopy(await state.get_data())
+    try:
+        async with _query_semaphore:
+            result, last_error = await _run_query_attempts(user_id, data, attempts=2)
+            if last_error is None:
+                return await _process_query_result(bot, user_id, data, result, refund_credit)
+
+        # ── سامانهٔ استعلام پاسخ نداد: یک دقیقهٔ بعد با همین اطلاعات دوباره ──
+        _schedule_query_retry(bot, user_id, data, refund_credit, last_error)
+        await _safe_send(
+            bot, user_id,
+            "⏳ سامانهٔ استعلام مالیاتی در حال حاضر پاسخ نمی‌دهد.\n"
+            "🔄 *تا یک دقیقهٔ دیگر* استعلام با همین اطلاعات به‌صورت خودکار تکرار و نتیجه و فایل PDF "
+            "برای شما ارسال می‌شود؛ نیازی به ثبت دوبارهٔ اطلاعات نیست.",
+            reply_markup=get_main_menu_kb(user_id),
+        )
+        return True
+    finally:
+        await state.clear()
+
+
+async def _run_query_attempts(user_id: int, data: dict, attempts: int):
+    """استعلام از سامانه با تلاش مجدد؛ خروجی (result, last_error)."""
+    loop = asyncio.get_running_loop()
+    province = data.get("rv_province", "")
+    address = data.get("rv_address", "")
+    rv_lat, rv_lng = data.get("rv_lat"), data.get("rv_lng")
+    result, last_error = None, None
+    for attempt in range(1, attempts + 1):
+        try:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, _do_query_sync, province, address, rv_lat, rv_lng),
+                timeout=_STEP_TIMEOUT_SECONDS,
+            )
+            return result, None
+        except Exception as e:
+            last_error = e
+            logger.error(f"[RV] خطا در تلاش {attempt} استعلام برای کاربر {user_id}: {e}", exc_info=True)
+            if attempt < attempts:
+                await asyncio.sleep(2)
+    return None, last_error
+
+
+async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refund_credit: bool) -> bool:
+    """محاسبهٔ عرصه/اعیانی از نتیجهٔ استعلام و ارسال پیام و PDF به کاربر."""
     province = data.get("rv_province", "")
     address = data.get("rv_address", "")
     rv_lat = data.get("rv_lat")
     rv_lng = data.get("rv_lng")
     area = data.get("rv_area", 0)
     land_use = data.get("rv_land_use", "مسکونی")
+    loop = asyncio.get_running_loop()
 
-    async with _query_semaphore:
-        loop = asyncio.get_running_loop()
-        result = None
-        last_error = None
+    try:
+        tax_result = result.get("tax_info", {}) if result else {}
 
-        # ── تلاش اول + یک تلاش مجدد خودکار در صورت خطای سیستمی ──
-        for attempt in (1, 2):
-            try:
-                result = await asyncio.wait_for(
-                    loop.run_in_executor(None, _do_query_sync, province, address, rv_lat, rv_lng),
-                    timeout=_STEP_TIMEOUT_SECONDS,
-                )
-                last_error = None
-                break
-            except Exception as e:
-                last_error = e
-                logger.error(f"[RV] خطا در تلاش {attempt} استعلام برای کاربر {user_id}: {e}", exc_info=True)
-                if attempt == 1:
-                    await asyncio.sleep(2)
-
-        if last_error is not None:
-            await _system_failure(
-                message, state, bot, user_id, refund_credit,
-                f"🛑 استعلام ارزش منطقه‌ای برای کاربر {user_id} پس از ۲ تلاش شکست خورد.\n"
-                f"استان: {province} | آدرس: {address}\nخطا: {last_error}",
-                "⚠️ در حال حاضر سامانهٔ استعلام با مشکل مواجه است.\nلطفاً *۳۰ دقیقه دیگر* دوباره تلاش کنید.",
+        if not tax_result.get("فیلدهای_ساختاریافته"):
+            await _safe_send(
+                bot, user_id,
+                "⚠️ متاسفانه نتیجه‌ای از سامانه مالیاتی دریافت نشد.\n"
+                "ممکن است آدرس دقیق نباشد یا مختصات خارج از محدوده تعریف‌شده باشد.",
+                reply_markup=get_main_menu_kb(user_id),
             )
             return
 
-        try:
-            tax_result = result.get("tax_info", {}) if result else {}
-
-            if not tax_result.get("فیلدهای_ساختاریافته"):
-                await message.answer(
-                    "⚠️ متاسفانه نتیجه‌ای از سامانه مالیاتی دریافت نشد.\n"
-                    "ممکن است آدرس دقیق نباشد یا مختصات خارج از محدوده تعریف‌شده باشد.",
-                    reply_markup=get_main_menu_kb(user_id),
-                )
-                return
-
-            all_lu_values = extract_all_land_use_values(tax_result)
-            if not any(v is not None for v in all_lu_values.values()):
-                await message.answer(
-                    "🛑 منطقهٔ مورد نظر شما در سایت اداره امور مالیاتی، ارزش منطقه‌ای ثبت نشده است.",
-                    reply_markup=get_main_menu_kb(user_id),
-                )
-                return
-
-            # ── عرصه: ارزش واحد از سامانه (برای «سایر» مبنای مسکونی × ضریب تعدیل) ──
-            land = ayani_calc.compute_land_value(
-                area, land_use, all_lu_values, other_index=data.get("rv_land_other_idx"),
-            )
-            if not land["ok"]:
-                available = [
-                    f"{lu}: {v:,} ریال" for lu in LAND_USES
-                    if (v := find_land_use_value(tax_result, lu)) is not None
-                ]
-                avail_text = "\n".join(available) if available else "هیچ مقداری یافت نشد"
-                await message.answer(
-                    f"⚠️ کاربری *{land_use}* برای این موقعیت تعریف نشده است.\n\nارزش‌های موجود:\n{avail_text}",
-                    reply_markup=get_main_menu_kb(user_id),
-                )
-                return
-
-            # ── وجود اعیانی و سهم مالکانه ──
-            # پرونده‌های قدیمی (قبل از سؤال «اعیانی دارد؟») همیشه اعیانی داشتند → True
-            has_building = data.get("rv_has_building") is not False
-            land_share, bld_share = _effective_shares(data)
-
-            # ── اعیانی: تعیین شهرستان از روی نقشه (هرگز «یافت نشد» نمی‌دهد) ──
-            geo = result.get("geocoded") or {}
-            g_lat = rv_lat if rv_lat is not None else geo.get("lat")
-            g_lng = rv_lng if rv_lng is not None else geo.get("lng")
-
-            def _resolve():
-                hints = []
-                if g_lat is not None and g_lng is not None:
-                    try:
-                        hints = ayani_calc.detect_location_names(g_lat, g_lng)
-                    except Exception as e:
-                        logger.warning(f"[RV] detect_location_names ناموفق: {e}")
-                if geo.get("city"):
-                    hints.append(geo["city"])
-                return ayani_calc.resolve_county(province, g_lat, g_lng, hints)
-
-            async def _resolve_county():
-                try:
-                    return await asyncio.wait_for(loop.run_in_executor(None, _resolve),
-                                                  timeout=_STEP_TIMEOUT_SECONDS)
-                except asyncio.TimeoutError:
-                    # بدون نام‌یابی نقشه — فقط با مختصات/مرکز استان
-                    return await loop.run_in_executor(
-                        None, lambda: ayani_calc.resolve_county(province, g_lat, g_lng, []))
-
-            if has_building:
-                county_info = await _resolve_county()
-            else:
-                # بدون اعیانی، شهرستان فقط برای نمایش است — شکست آن نباید مانع نتیجه شود
-                try:
-                    county_info = await _resolve_county()
-                except Exception as county_err:
-                    logger.warning(f"[RV] تعیین شهرستان (بدون اعیانی) ناموفق: {county_err}")
-                    county_info = {"county": geo.get("city") or "-", "rates": None,
-                                   "method": "none", "hint": geo.get("city")}
-            logger.info(f"[RV] شهرستان اعیانی: {county_info['county']} "
-                        f"(روش={county_info['method']}, نقشه={county_info.get('hint')})")
-
-            building = None
-            if has_building:
-                building = ayani_calc.compute_building_value(
-                    county_info["rates"],
-                    use_key=data.get("rv_bld_use") or "residential",
-                    structure=data.get("rv_bld_structure") or "concrete",
-                    area=data.get("rv_bld_area") or 0,
-                    complete=bool(data.get("rv_bld_complete")),
-                    stage_key=data.get("rv_bld_stage") or "foundation",
-                    parking_area=data.get("rv_bld_parking_area") or 0,
-                    floor=data.get("rv_bld_floor"),
-                    age=data.get("rv_bld_age") or 0,
-                )
-            calc = ayani_calc.compute_all(land, building, land_share=land_share, building_share=bld_share)
-            if _share_needs_detail(data.get("rv_share_arse_links")):
-                calc["land_share_desc"] = osh.describe_chain(data["rv_share_arse_links"])
-            bld_links = (data.get("rv_share_aayan_links") if data.get("rv_share_same") is False
-                         else data.get("rv_share_arse_links"))
-            if has_building and _share_needs_detail(bld_links):
-                calc["building_share_desc"] = osh.describe_chain(bld_links)
-            # به کاربر نام شهرستانِ واقعی نقطه (از نقشه) نمایش داده می‌شود؛ اگر نرخ از
-            # شهرستان همسایه گرفته شده باشد، فقط در لاگ ثبت می‌شود.
-            county_label = county_info["county"]
-            if county_info["method"] != "name" and county_info.get("hint"):
-                county_label = county_info["hint"].replace("شهرستان ", "").strip()
-
-            # خطای لحظه‌ای ارسال این پیام نباید مانع ساخت/ارسال PDF شود (کپشن PDF هم مقادیر را دارد)
+        all_lu_values = extract_all_land_use_values(tax_result)
+        if not any(v is not None for v in all_lu_values.values()):
             await _safe_send(
                 bot, user_id,
-                f"📊 *نتیجهٔ محاسبهٔ ارزش منطقه‌ای*\n\n"
-                f"📍 {province} — {county_label}\n\n"
-                f"{_result_values_text(calc, bold=True)}",
-            )
-
-            # ── ساخت و ارسال PDF؛ در صورت شکست، با همان اطلاعات هر یک دقیقه دوباره ──
-            job = {
-                "user_id": user_id,
-                "province": province,
-                "county": county_label,
-                "address": address,
-                "tax_result": copy.deepcopy(tax_result),
-                "calc": copy.deepcopy(calc),
-                "plak": data.get("rv_plak_text") or None,
-                "has_building": has_building,
-                "inputs_summary": _inputs_summary(data),
-                "refund_credit": refund_credit,
-            }
-            if await _build_and_send_pdf(bot, job):
-                await _safe_send(bot, user_id, "بازگشت به منوی اصلی.", reply_markup=get_main_menu_kb(user_id))
-                return True
-
-            _schedule_pdf_retry(bot, job)
-            await _safe_send(
-                bot, user_id,
-                "⏳ فایل PDF گزارش به‌دلیل اختلال لحظه‌ای آماده نشد.\n"
-                "📄 *تا یک دقیقهٔ دیگر* فایل با همین اطلاعات به‌صورت خودکار برای شما ارسال می‌شود؛ "
-                "نیازی به استعلام مجدد نیست.",
+                "🛑 منطقهٔ مورد نظر شما در سایت اداره امور مالیاتی، ارزش منطقه‌ای ثبت نشده است.",
                 reply_markup=get_main_menu_kb(user_id),
             )
-            # اعتبار مصرف‌شده برمی‌گردد فقط اگر همهٔ تلاش‌های بعدی هم شکست بخورد
+            return
+
+        # ── عرصه: ارزش واحد از سامانه (برای «سایر» مبنای مسکونی × ضریب تعدیل) ──
+        land = ayani_calc.compute_land_value(
+            area, land_use, all_lu_values, other_index=data.get("rv_land_other_idx"),
+        )
+        if not land["ok"]:
+            available = [
+                f"{lu}: {v:,} ریال" for lu in LAND_USES
+                if (v := find_land_use_value(tax_result, lu)) is not None
+            ]
+            avail_text = "\n".join(available) if available else "هیچ مقداری یافت نشد"
+            await _safe_send(
+                bot, user_id,
+                f"⚠️ کاربری *{land_use}* برای این موقعیت تعریف نشده است.\n\nارزش‌های موجود:\n{avail_text}",
+                reply_markup=get_main_menu_kb(user_id),
+            )
+            return
+
+        # ── وجود اعیانی و سهم مالکانه ──
+        # پرونده‌های قدیمی (قبل از سؤال «اعیانی دارد؟») همیشه اعیانی داشتند → True
+        has_building = data.get("rv_has_building") is not False
+        land_share, bld_share = _effective_shares(data)
+
+        # ── اعیانی: تعیین شهرستان از روی نقشه (هرگز «یافت نشد» نمی‌دهد) ──
+        geo = result.get("geocoded") or {}
+        g_lat = rv_lat if rv_lat is not None else geo.get("lat")
+        g_lng = rv_lng if rv_lng is not None else geo.get("lng")
+
+        def _resolve():
+            hints = []
+            if g_lat is not None and g_lng is not None:
+                try:
+                    hints = ayani_calc.detect_location_names(g_lat, g_lng)
+                except Exception as e:
+                    logger.warning(f"[RV] detect_location_names ناموفق: {e}")
+            if geo.get("city"):
+                hints.append(geo["city"])
+            return ayani_calc.resolve_county(province, g_lat, g_lng, hints)
+
+        async def _resolve_county():
+            try:
+                return await asyncio.wait_for(loop.run_in_executor(None, _resolve),
+                                              timeout=_STEP_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                # بدون نام‌یابی نقشه — فقط با مختصات/مرکز استان
+                return await loop.run_in_executor(
+                    None, lambda: ayani_calc.resolve_county(province, g_lat, g_lng, []))
+
+        if has_building:
+            county_info = await _resolve_county()
+        else:
+            # بدون اعیانی، شهرستان فقط برای نمایش است — شکست آن نباید مانع نتیجه شود
+            try:
+                county_info = await _resolve_county()
+            except Exception as county_err:
+                logger.warning(f"[RV] تعیین شهرستان (بدون اعیانی) ناموفق: {county_err}")
+                county_info = {"county": geo.get("city") or "-", "rates": None,
+                               "method": "none", "hint": geo.get("city")}
+        logger.info(f"[RV] شهرستان اعیانی: {county_info['county']} "
+                    f"(روش={county_info['method']}, نقشه={county_info.get('hint')})")
+
+        building = None
+        if has_building:
+            building = ayani_calc.compute_building_value(
+                county_info["rates"],
+                use_key=data.get("rv_bld_use") or "residential",
+                structure=data.get("rv_bld_structure") or "concrete",
+                area=data.get("rv_bld_area") or 0,
+                complete=bool(data.get("rv_bld_complete")),
+                stage_key=data.get("rv_bld_stage") or "foundation",
+                parking_area=data.get("rv_bld_parking_area") or 0,
+                floor=data.get("rv_bld_floor"),
+                age=data.get("rv_bld_age") or 0,
+            )
+        calc = ayani_calc.compute_all(land, building, land_share=land_share, building_share=bld_share)
+        if _share_needs_detail(data.get("rv_share_arse_links")):
+            calc["land_share_desc"] = osh.describe_chain(data["rv_share_arse_links"])
+        bld_links = (data.get("rv_share_aayan_links") if data.get("rv_share_same") is False
+                     else data.get("rv_share_arse_links"))
+        if has_building and _share_needs_detail(bld_links):
+            calc["building_share_desc"] = osh.describe_chain(bld_links)
+        # به کاربر نام شهرستانِ واقعی نقطه (از نقشه) نمایش داده می‌شود؛ اگر نرخ از
+        # شهرستان همسایه گرفته شده باشد، فقط در لاگ ثبت می‌شود.
+        county_label = county_info["county"]
+        if county_info["method"] != "name" and county_info.get("hint"):
+            county_label = county_info["hint"].replace("شهرستان ", "").strip()
+
+        # خطای لحظه‌ای ارسال این پیام نباید مانع ساخت/ارسال PDF شود (کپشن PDF هم مقادیر را دارد)
+        await _safe_send(
+            bot, user_id,
+            f"📊 *نتیجهٔ محاسبهٔ ارزش منطقه‌ای*\n\n"
+            f"📍 {province} — {county_label}\n\n"
+            f"{_result_values_text(calc, bold=True)}",
+        )
+
+        # ── ساخت و ارسال PDF؛ در صورت شکست، با همان اطلاعات هر یک دقیقه دوباره ──
+        job = {
+            "user_id": user_id,
+            "province": province,
+            "county": county_label,
+            "address": address,
+            "tax_result": copy.deepcopy(tax_result),
+            "calc": copy.deepcopy(calc),
+            "plak": data.get("rv_plak_text") or None,
+            "has_building": has_building,
+            "inputs_summary": _inputs_summary(data),
+            "refund_credit": refund_credit,
+        }
+        if await _build_and_send_pdf(bot, job):
+            await _safe_send(bot, user_id, "بازگشت به منوی اصلی.", reply_markup=get_main_menu_kb(user_id))
             return True
 
-        except Exception as e:
-            # سپر نهایی: هیچ خطای پیش‌بینی‌نشده‌ای نباید کل ربات را کرش کند
-            logger.error(f"[RV] خطای غیرمنتظره در پردازش کاربر {user_id}: {e}", exc_info=True)
-            try:
-                await _system_failure(
-                    message, state, bot, user_id, refund_credit,
-                    f"🛑 خطای غیرمنتظره برای کاربر {user_id}: {e}",
-                    "⚠️ خطایی در پردازش استعلام رخ داد. لطفاً *۳۰ دقیقه دیگر* دوباره تلاش کنید.",
-                )
-            except Exception:
-                pass
-        finally:
-            await state.clear()
+        _schedule_pdf_retry(bot, job)
+        await _safe_send(
+            bot, user_id,
+            "⏳ فایل PDF گزارش به‌دلیل اختلال لحظه‌ای آماده نشد.\n"
+            "📄 *تا یک دقیقهٔ دیگر* فایل با همین اطلاعات به‌صورت خودکار برای شما ارسال می‌شود؛ "
+            "نیازی به استعلام مجدد نیست.",
+            reply_markup=get_main_menu_kb(user_id),
+        )
+        # اعتبار مصرف‌شده برمی‌گردد فقط اگر همهٔ تلاش‌های بعدی هم شکست بخورد
+        return True
+
+    except Exception as e:
+        # سپر نهایی: هیچ خطای پیش‌بینی‌نشده‌ای نباید کل ربات را کرش کند
+        logger.error(f"[RV] خطای غیرمنتظره در پردازش کاربر {user_id}: {e}", exc_info=True)
+        try:
+            await _system_failure(
+                bot, user_id, refund_credit,
+                f"🛑 خطای غیرمنتظره برای کاربر {user_id}: {e}",
+                "⚠️ خطایی در پردازش استعلام رخ داد و به پشتیبانی اطلاع داده شد.",
+            )
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -2180,7 +2199,7 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
 # ══════════════════════════════════════════════════════════════════
 _PDF_RETRY_DELAY_SECONDS = 60
 _PDF_RETRY_MAX_ATTEMPTS = 10  # حداکثر ~۱۰ دقیقه
-_pending_pdf_tasks: set = set()  # نگه‌داشتن ارجاع تا task توسط GC حذف نشود
+_pending_tasks: set = set()  # نگه‌داشتن ارجاع تا task توسط GC حذف نشود
 
 
 async def _safe_send(bot: Bot, chat_id: int, text: str, **kwargs) -> bool:
@@ -2247,8 +2266,8 @@ async def _build_and_send_pdf(bot: Bot, job: dict) -> bool:
 
 def _schedule_pdf_retry(bot: Bot, job: dict) -> None:
     task = asyncio.create_task(_pdf_retry_worker(bot, job))
-    _pending_pdf_tasks.add(task)
-    task.add_done_callback(_pending_pdf_tasks.discard)
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)
     logger.info(f"[RV] ارسال PDF کاربر {job['user_id']} برای یک دقیقهٔ بعد زمان‌بندی شد "
                 f"({job.get('last_error', '-')})")
 
@@ -2296,6 +2315,44 @@ async def _pdf_retry_worker(bot: Bot, job: dict) -> None:
         "⚠️ متأسفانه ارسال فایل PDF گزارش ممکن نشد (نتیجه و نحوهٔ محاسبه به‌صورت متنی ارسال شد). "
         "موضوع به پشتیبانی اطلاع داده شد." + (_REFUND_NOTE if refund else ""),
         reply_markup=get_main_menu_kb(user_id),
+    )
+
+
+_QUERY_RETRY_DELAY_SECONDS = 60
+_QUERY_RETRY_MAX_ATTEMPTS = 10  # حداکثر ~۱۰ دقیقه
+
+
+def _schedule_query_retry(bot: Bot, user_id: int, data: dict, refund_credit: bool, last_error) -> None:
+    task = asyncio.create_task(_query_retry_worker(bot, user_id, data, refund_credit, last_error))
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)
+    logger.info(f"[RV] استعلام کاربر {user_id} برای یک دقیقهٔ بعد زمان‌بندی شد ({last_error})")
+
+
+async def _query_retry_worker(bot: Bot, user_id: int, data: dict, refund_credit: bool, last_error) -> None:
+    try:
+        for attempt in range(1, _QUERY_RETRY_MAX_ATTEMPTS + 1):
+            await asyncio.sleep(_QUERY_RETRY_DELAY_SECONDS)
+            logger.info(f"[RV] تلاش مجدد {attempt}/{_QUERY_RETRY_MAX_ATTEMPTS} استعلام برای کاربر {user_id}")
+            async with _query_semaphore:
+                result, err = await _run_query_attempts(user_id, data, attempts=1)
+                if err is None:
+                    logger.info(f"[RV] استعلام کاربر {user_id} در تلاش پس‌زمینهٔ {attempt} موفق شد")
+                    await _process_query_result(bot, user_id, data, result, refund_credit)
+                    return
+            last_error = err
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        last_error = e
+        logger.error(f"[RV] خطای غیرمنتظره در تلاش پس‌زمینهٔ استعلام برای {user_id}: {e}", exc_info=True)
+
+    await _system_failure(
+        bot, user_id, refund_credit,
+        f"🛑 استعلام ارزش منطقه‌ای برای کاربر {user_id} پس از {_QUERY_RETRY_MAX_ATTEMPTS} تلاش "
+        f"(هر یک دقیقه) شکست خورد.\nخطا: {last_error}\n{_inputs_summary(data)}",
+        "⚠️ متأسفانه سامانهٔ استعلام مالیاتی پس از چند بار تلاش همچنان پاسخ نمی‌دهد و موضوع به "
+        "پشتیبانی اطلاع داده شد. لطفاً کمی بعد دوباره استعلام بگیرید.",
     )
 
 
