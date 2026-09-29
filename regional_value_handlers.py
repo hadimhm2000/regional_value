@@ -846,6 +846,26 @@ _scope_kb = ReplyKeyboardMarkup(
 )
 
 
+def _chain_so_far(wip: dict) -> str:
+    """«۲۳۰ سهم از ۲۸۱۶ سهم» — زنجیرهٔ واردشده تا این لحظه (بدون «از ششدانگ»)."""
+    return osh.describe_chain(wip["links"]).replace(" از ششدانگ", "")
+
+
+def _prev_sahm_total(wip: dict):
+    """تعداد کل سهام حلقهٔ قبلی (مثلاً ۲۸۱۶ در «۲۳۰ سهم از ۲۸۱۶ سهم») یا None."""
+    if wip.get("links") and wip["links"][-1]["k"] == osh.KIND_SAHM:
+        return osh.frac_from_str(wip["links"][-1]["d"])
+    return None
+
+
+def _prev_share_button(wip: dict):
+    """دکمهٔ «همان سهم قبلی» برای عدد اولِ حلقهٔ بعدیِ «سهم از سهم»."""
+    prev = _prev_sahm_total(wip)
+    if prev is None:
+        return None
+    return f"↩️ همان {osh.fmt_frac(prev)} سهم قبلی"
+
+
 def _share_kinds(wip: dict) -> list:
     return _SHARE_KINDS_FIRST if not wip["links"] else _SHARE_KINDS_NEXT
 
@@ -881,8 +901,13 @@ async def _ask_share(message: Message, state: FSMContext, target: str):
                 f"(۶۰ سهم از ۷۲ سهم)."
             )
         else:
+            prev = _prev_sahm_total(wip)
             text = (
-                f"📎 تا اینجا: «{osh.describe_chain(wip['links']).replace(' از ششدانگ', '')}»\n\n"
+                f"📎 تا اینجا: «{_chain_so_far(wip)}»\n"
+                + (f"🧮 نتیجهٔ سهم قبلی: *{osh.fmt_frac(prev)} سهم* — اگر این {osh.fmt_frac(prev)} سهم "
+                   f"خودش از تعداد سهام دیگری است (مثلاً «از ۱۹۶۰۰ سهم»)، گزینهٔ «سهم از سهم» را بزنید.\n"
+                   if prev is not None else "")
+                + "\n"
                 f"این مقدار از *چه بخشی* از ملک است؟ نوع آن را انتخاب کنید:\n"
                 f"(مثلاً در «۲ سهم از ۴۸ سهم از ۳ دانگ»، بخش دوم «۳ دانگ» است)\n\n"
                 f"{_numbered([t for t, _ in kinds])}"
@@ -898,6 +923,35 @@ async def _ask_share(message: Message, state: FSMContext, target: str):
                     "مثال: ۳ — ۱٫۵ — ۲ و نیم")
         elif kind == osh.KIND_PERCENT:
             text = "🔢 *درصد* مالکیت را وارد کنید (بیشتر از ۰ و حداکثر ۱۰۰):\nمثال: ۲۵ — ۱۲٫۵"
+        elif wip["links"]:
+            # حلقهٔ دوم به بعد: نتیجهٔ سهم قبلی اعلام می‌شود تا کاربر همان را (یا عدد دیگری) وارد کند
+            chain = _chain_so_far(wip)
+            prev = _prev_sahm_total(wip)
+            btn = _prev_share_button(wip)
+            if prev is not None:
+                prev_txt = osh.fmt_frac(prev)
+                text = (
+                    f"📎 تا اینجا: «{chain}»\n"
+                    f"🧮 نتیجهٔ سهم قبلی: *{prev_txt} سهم*\n\n"
+                    f"🔢 حالا *عدد اولِ* بخش بعدی را وارد کنید (سهمی که از تعداد کلِ بعدی است):\n"
+                    f"• اگر در سند نوشته «{chain} از …… سهم» یعنی همین {prev_txt} سهم از کل، "
+                    f"دکمهٔ «{btn}» را بزنید.\n"
+                    f"• اگر منظورتان سهم دیگری است، عدد آن را تایپ کنید.\n\n"
+                    f"در مرحلهٔ بعد *تعداد کل سهام* (عدد آخر، مثلاً ۱۹۶۰۰) پرسیده می‌شود."
+                )
+            else:
+                text = (
+                    f"📎 تا اینجا: «{chain}»\n\n"
+                    f"🔢 *تعداد سهم* بخش بعدی را وارد کنید (عدد اول):\n"
+                    f"مثال: در «… از ۱۲٫۵ سهم از ۷۲ سهم» عدد *۱۲٫۵*"
+                )
+            kb = nav_only_kb()
+            if btn:
+                kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=btn)], nav_row()],
+                                         resize_keyboard=True)
+            await message.answer(text, reply_markup=kb)
+            await state.set_state(RVForm.waiting_share_amount)
+            return
         else:
             text = ("🔢 *تعداد سهم مالک* را وارد کنید (عدد اول):\n"
                     "مثال: در «۱۲٫۵ سهم مشاع از ۷۲ سهم» عدد *۱۲٫۵*")
@@ -906,10 +960,17 @@ async def _ask_share(message: Message, state: FSMContext, target: str):
         return
 
     if stage == "den":
+        num_txt = osh.fmt_frac(wip["num"])
+        if wip["links"]:
+            text = (f"🔢 *تعداد کل سهام* را وارد کنید (عدد آخر):\n"
+                    f"یعنی {num_txt} سهم از چند سهم است؟ مثال: در «… از {num_txt} سهم از ۱۹۶۰۰ سهم» عدد *۱۹۶۰۰*\n\n"
+                    f"📎 تا اینجا: «{_chain_so_far(wip)}، از {num_txt} سهم از …… سهم»")
+        else:
+            text = (f"🔢 *تعداد کل سهام* را وارد کنید (عدد دوم):\n"
+                    f"مثال: در «۱۲٫۵ سهم مشاع از ۷۲ سهم» عدد *۷۲*\n\n"
+                    f"(سهم مالک: {num_txt} سهم)")
         await message.answer(
-            f"🔢 *تعداد کل سهام* را وارد کنید (عدد دوم):\n"
-            f"مثال: در «۱۲٫۵ سهم مشاع از ۷۲ سهم» عدد *۷۲*\n\n"
-            f"(سهم مالک: {osh.fmt_frac(wip['num'])} سهم)",
+            text,
             reply_markup=nav_only_kb(),
         )
         await state.set_state(RVForm.waiting_share_den)
@@ -1005,7 +1066,11 @@ async def process_share(message: Message, state: FSMContext):
 
     # ── ورود عدد (مقدار / صورت / مخرج)
     if stage in ("amount", "den"):
-        value, err = osh.parse_amount(text)
+        btn = _prev_share_button(wip) if stage == "amount" and wip["kind"] == osh.KIND_SAHM else None
+        if btn and text == btn:
+            value, err = _prev_sahm_total(wip), None
+        else:
+            value, err = osh.parse_amount(text)
         if err:
             await message.answer(f"⚠️ {osh.ERROR_HINTS[err]}")
             return
