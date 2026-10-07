@@ -5,7 +5,7 @@ menu_handlers.py — بخش‌های منوی اصلی غیر از خود فرم
   📂 سوابق استعلام      — فهرست استعلام‌های قبلی، دریافت دوبارهٔ PDF (بدون مصرف اعتبار)،
                           «محاسبهٔ مجدد با تغییر» (بارگذاری اطلاعات قبلی در فرم)
   🔎 بررسی اصالت گزارش  — وارد کردن کد رهگیری یا اسکن QR روی PDF (/start v_...)
-  👤 حساب کاربری        — وضعیت اشتراک، خرید/تمدید، اشتراک دفتری (دعوت/حذف همکار، عضویت با کد)
+  👤 حساب کاربری        — وضعیت اشتراک، دفتر ثبت‌شده، خرید/تمدید
   ➕ / 📑 گزارش تجمیعی  — افزودن ملک دیگر به گزارش و دریافت PDF تجمیعی
 
 این روتر قبل از روتر فرم استعلام ثبت می‌شود تا دکمه‌های منو در هر مرحله‌ای کار کنند.
@@ -29,8 +29,7 @@ import access_control
 import db
 import history
 from bale_file_sender import send_document_direct
-from config import (ADMIN_ID, BATCH_MAX_ITEMS, BOT_USERNAME, HISTORY_PAGE_SIZE, OFFICE_MAX_MEMBERS,
-                    SUBSCRIPTION_PLANS)
+from config import ADMIN_ID, BATCH_MAX_ITEMS, HISTORY_PAGE_SIZE
 from keyboards import (ACCOUNT_BUTTON, BATCH_ADD_BUTTON, HISTORY_BUTTON, MAIN_MENU_BUTTON, VERIFY_BUTTON,
                        is_back, is_batch_pdf_button, is_button, is_main_menu_button, is_restart, main_menu_kb,
                        nav_only_kb)
@@ -46,7 +45,6 @@ _PDF_TIMEOUT_SECONDS = 90
 
 class MenuForm(StatesGroup):
     waiting_verify_code = State()
-    waiting_invite_code = State()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -106,32 +104,24 @@ async def _go_main(message: Message, state: FSMContext, text: str = "🏠 منو
     await message.answer(text, reply_markup=main_menu_kb())
 
 
-def _owner_name(owner_id: int) -> str:
-    tr = db.query_one("SELECT full_name FROM trial_requests WHERE user_id=?", (owner_id,))
-    return (tr["full_name"] if tr and tr["full_name"] else "") or str(owner_id)
-
-
 # ══════════════════════════════════════════════════════════════════
-# /start (با پارامترهای v_ = تأیید اصالت، j_ = عضویت در دفتر) و منوی اصلی
+# /start (با پارامتر v_ = تأیید اصالت) و منوی اصلی
 # ══════════════════════════════════════════════════════════════════
 WELCOME = (
     "👋 به ربات استعلام ارزش منطقه‌ای خوش آمدید.\n\n"
     f"• «{MAIN_MENU_BUTTON}»: استعلام و محاسبهٔ ارزش عرصه و اعیانی با خروجی PDF\n"
     f"• «{HISTORY_BUTTON}»: استعلام‌های قبلی، دریافت دوبارهٔ PDF و محاسبهٔ مجدد\n"
     f"• «{VERIFY_BUTTON}»: بررسی اصالت یک گزارش با کد رهگیری\n"
-    f"• «{ACCOUNT_BUTTON}»: وضعیت اشتراک، تمدید و افزودن همکاران دفتر"
+    f"• «{ACCOUNT_BUTTON}»: وضعیت و تمدید اشتراک"
 )
 
 
 @menu_router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, command: CommandObject, bot: Bot):
+async def cmd_start(message: Message, state: FSMContext, command: CommandObject):
     await state.clear()  # /start همیشه کاربر را از هر مرحله‌ای به منوی اصلی برمی‌گرداند
     arg = (command.args or "").strip()
     if arg.startswith("v_"):
         await _verify_and_reply(message, arg[2:])
-        return
-    if arg.startswith("j_"):
-        await _join_with_code(message, state, bot, arg[2:])
         return
     await message.answer(WELCOME, reply_markup=main_menu_kb())
 
@@ -452,7 +442,7 @@ async def _verify_not_found(message: Message, code: str, keep_waiting: bool):
 
 
 # ══════════════════════════════════════════════════════════════════
-# 👤 حساب کاربری و اشتراک دفتری
+# 👤 حساب کاربری
 # ══════════════════════════════════════════════════════════════════
 @menu_router.message(lambda m: bool(m.text) and is_button(m.text, ACCOUNT_BUTTON))
 async def account_menu(message: Message, state: FSMContext):
@@ -463,39 +453,28 @@ async def account_menu(message: Message, state: FSMContext):
 async def _send_account(message: Message, uid: int):
     approved = await access_control.is_approved(uid)
     own = await access_control.get_own_subscription(uid)
-    membership = await access_control.office_membership(uid)
     credits = await access_control.free_retry_count(uid)
+    office = access_control.get_office_info(uid)
     lines = ["👤 *حساب کاربری*\n", f"🆔 شناسهٔ شما: {uid}"]
+    if office.get("office_name"):
+        lines.append(f"🏢 دفتر: {office['office_name']}")
+    if office.get("office_code"):
+        lines.append(f"🔢 کد دفتر: {office['office_code']}")
     if approved:
         lines.append("✅ دسترسی: رایگان و دائمی (تایید مدیر سامانه)")
     elif own:
-        title = SUBSCRIPTION_PLANS.get(own["plan"], {}).get("title", own["plan"])
-        lines.append(f"💳 {title}: فعال تا {fa_date(own['expires_at'])} "
+        lines.append(f"💳 {access_control.plan_title(own['plan'])}: فعال تا {fa_date(own['expires_at'])} "
                      f"({_fa(_days_left(own['expires_at']))} روز باقی‌مانده)")
-    if membership:
-        owner = membership["owner_id"]
-        osub = await access_control.get_own_subscription(owner)
-        status = ("فعال" + (f" تا {fa_date(osub['expires_at'])}" if osub else "")
-                  if membership["owner_active"] else "⛔️ غیرفعال (اشتراک مدیر دفتر به پایان رسیده)")
-        lines.append(f"👥 عضو اشتراک دفتر «{_owner_name(owner)}»: {status}")
-    if not approved and not own and not (membership and membership["owner_active"]):
+    else:
         lines.append("⛔️ اشتراک فعالی ندارید.")
     if credits:
         lines.append(f"🎁 استعلام رایگان باقی‌مانده: {_fa(credits)}")
     lines.append(f"📊 استعلام‌های ثبت‌شده: {_fa(history.count_user_queries(uid))}")
-
-    rows = []
+    kb = None
     if not approved:
-        rows.append([InlineKeyboardButton(text="💳 خرید / تمدید اشتراک", callback_data="acc:renew")])
-    if await access_control.can_own_office(uid):
-        n = len(await access_control.list_office_members(uid))
-        rows.append([InlineKeyboardButton(text=f"👥 همکاران دفتر ({_fa(n)} از {_fa(OFFICE_MAX_MEMBERS)})",
-                                          callback_data="acc:office")])
-    if membership:
-        rows.append([InlineKeyboardButton(text="🚪 خروج از اشتراک دفتر", callback_data="acc:leave")])
-    else:
-        rows.append([InlineKeyboardButton(text="🔗 عضویت در دفتر با کد دعوت", callback_data="acc:join")])
-    await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="💳 خرید / تمدید اشتراک", callback_data="acc:renew")]])
+    await message.answer("\n".join(lines), reply_markup=kb)
 
 
 @menu_router.callback_query(F.data == "acc:renew")
@@ -509,145 +488,6 @@ async def cb_renew(callback: CallbackQuery, state: FSMContext):
         prefix = (f"ℹ️ اشتراک فعلی شما تا {fa_date(own['expires_at'])} فعال است؛ مدت اشتراک جدید به انتهای "
                   "آن اضافه می‌شود.\n\n")
     await _ask_plan(callback.message, state, prefix)
-
-
-def _invite_link(code: str) -> str:
-    return f"https://ble.ir/{BOT_USERNAME}?start=j_{code.replace('-', '')}"
-
-
-async def _office_panel(message: Message, uid: int, edit: bool = False):
-    office = await access_control.get_or_create_office(uid)
-    members = await access_control.list_office_members(uid)
-    code = office["invite_code"]
-    lines = [
-        "👥 *اشتراک دفتری*\n",
-        f"همکاران دفتر شما تا زمانی که اشتراک شما فعال است، بدون خرید اشتراک جداگانه از سامانه استفاده "
-        f"می‌کنند (حداکثر {_fa(OFFICE_MAX_MEMBERS)} نفر).\n",
-        f"🔑 کد دعوت: {code}",
-        f"🔗 لینک دعوت: {_invite_link(code)}\n",
-        "همکار شما لینک را باز می‌کند، یا در ربات «حساب کاربری ← عضویت در دفتر با کد دعوت» را می‌زند و "
-        "کد بالا را وارد می‌کند.\n",
-        f"اعضا ({_fa(len(members))} از {_fa(OFFICE_MAX_MEMBERS)}):",
-    ]
-    if members:
-        lines += [f"{_fa(i)}. {m['full_name'] or '-'} ({m['user_id']}) — از {fa_date(m['added_at'])}"
-                  for i, m in enumerate(members, 1)]
-    else:
-        lines.append("هنوز همکاری اضافه نشده است.")
-    rows = [[InlineKeyboardButton(text=f"❌ حذف {_short(m['full_name'] or str(m['user_id']), 20)}",
-                                  callback_data=f"om_rm:{m['user_id']}")] for m in members]
-    rows.append([InlineKeyboardButton(text="🔄 تغییر کد دعوت", callback_data="om_reset")])
-    kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    if edit:
-        try:
-            await message.edit_text("\n".join(lines), reply_markup=kb)
-            return
-        except Exception:
-            pass
-    await message.answer("\n".join(lines), reply_markup=kb)
-
-
-@menu_router.callback_query(F.data == "acc:office")
-async def cb_office(callback: CallbackQuery):
-    uid = callback.from_user.id
-    if not await access_control.can_own_office(uid):
-        await callback.answer("برای مدیریت همکاران، ابتدا اشتراک تهیه کنید.")
-        return
-    await callback.answer()
-    await _office_panel(callback.message, uid)
-
-
-@menu_router.callback_query(F.data == "om_reset")
-async def cb_office_reset(callback: CallbackQuery):
-    uid = callback.from_user.id
-    if not await access_control.can_own_office(uid):
-        await callback.answer("اشتراک فعال ندارید.")
-        return
-    await access_control.reset_invite_code(uid)
-    await callback.answer("کد دعوت جدید ساخته شد؛ کد قبلی دیگر کار نمی‌کند.")
-    await _office_panel(callback.message, uid, edit=True)
-
-
-@menu_router.callback_query(F.data.startswith("om_rm:"))
-async def cb_office_remove(callback: CallbackQuery, bot: Bot):
-    uid = callback.from_user.id
-    try:
-        member = int(callback.data.split(":", 1)[1])
-    except ValueError:
-        await callback.answer()
-        return
-    if await access_control.remove_office_member(uid, member):
-        await callback.answer("همکار حذف شد.")
-        try:
-            await bot.send_message(member, "ℹ️ دسترسی شما به اشتراک دفتر توسط مدیر دفتر لغو شد.",
-                                   reply_markup=main_menu_kb())
-        except Exception:
-            pass
-    else:
-        await callback.answer("این همکار در فهرست نیست.")
-    await _office_panel(callback.message, uid, edit=True)
-
-
-@menu_router.callback_query(F.data == "acc:leave")
-async def cb_office_leave(callback: CallbackQuery, bot: Bot):
-    owner = await access_control.leave_office(callback.from_user.id)
-    await callback.answer()
-    if owner is None:
-        await callback.message.answer("ℹ️ شما عضو اشتراک دفتری نیستید.", reply_markup=main_menu_kb())
-        return
-    await callback.message.answer("✅ از اشتراک دفتر خارج شدید.", reply_markup=main_menu_kb())
-    try:
-        name = getattr(callback.from_user, "full_name", "") or callback.from_user.id
-        await bot.send_message(owner, f"ℹ️ همکار «{name}» از اشتراک دفتر شما خارج شد.")
-    except Exception:
-        pass
-
-
-@menu_router.callback_query(F.data == "acc:join")
-async def cb_office_join(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.set_state(MenuForm.waiting_invite_code)
-    await callback.message.answer("🔗 کد دعوتی را که مدیر دفتر برای شما فرستاده وارد کنید:",
-                                  reply_markup=nav_only_kb())
-
-
-@menu_router.message(MenuForm.waiting_invite_code)
-async def invite_code_input(message: Message, state: FSMContext, bot: Bot):
-    if not message.text:
-        return
-    if is_back(message.text) or is_restart(message.text):
-        await _go_main(message, state)
-        return
-    await _join_with_code(message, state, bot, message.text)
-
-
-async def _join_with_code(message: Message, state: FSMContext, bot: Bot, code: str):
-    user = message.from_user
-    status, owner = await access_control.join_office(
-        user.id, code, getattr(user, "full_name", "") or "", OFFICE_MAX_MEMBERS)
-    msgs = {
-        "ok": "✅ عضو اشتراک دفتر شدید؛ از این پس بدون اشتراک جداگانه می‌توانید استعلام بگیرید.",
-        "owner_inactive": ("✅ عضو دفتر شدید، اما اشتراک مدیر دفتر در حال حاضر فعال نیست؛ پس از تمدید "
-                           "اشتراک توسط مدیر، دسترسی شما خودکار فعال می‌شود."),
-        "invalid": "⚠️ کد دعوت نامعتبر است. کد را از مدیر دفتر دوباره بگیرید.",
-        "self": "ℹ️ این کد دعوتِ دفتر خود شماست؛ آن را برای همکارانتان بفرستید.",
-        "already": "ℹ️ شما از قبل عضو همین دفتر هستید.",
-        "other_office": "⚠️ شما عضو دفتر دیگری هستید. ابتدا از «حساب کاربری» از آن دفتر خارج شوید.",
-        "full": "⚠️ ظرفیت همکاران این دفتر تکمیل است. با مدیر دفتر تماس بگیرید.",
-    }
-    if status == "invalid" and await state.get_state() == MenuForm.waiting_invite_code.state:
-        await message.answer(msgs[status], reply_markup=nav_only_kb())
-        return
-    await state.clear()
-    await message.answer(msgs[status], reply_markup=main_menu_kb())
-    if status in ("ok", "owner_inactive"):
-        db.log_event("office_join", user.id, str(owner))
-        try:
-            await bot.send_message(
-                owner, f"👥 «{getattr(user, 'full_name', '') or user.id}» با کد دعوت به اشتراک دفتر شما پیوست.\n"
-                       "مدیریت همکاران: «حساب کاربری ← همکاران دفتر».")
-        except Exception:
-            pass
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -666,17 +506,14 @@ async def send_renew_reminders(bot: Bot, soon_days: int) -> int:
         if await access_control.is_approved(uid):
             access_control.mark_reminded(uid, r["kind"], exp)
             continue
-        title = SUBSCRIPTION_PLANS.get(r["plan"], {}).get("title", "اشتراک")
-        members = await access_control.list_office_members(uid)
-        office_note = (f"\n👥 {_fa(len(members))} همکار دفتر شما هم از همین اشتراک استفاده می‌کنند."
-                       if members else "")
+        title = access_control.plan_title(r["plan"])
         if r["kind"] == "soon":
             text = (f"⏰ {title} شما {_fa(_days_left(exp))} روز دیگر ({fa_date(exp)}) به پایان می‌رسد.\n"
                     "برای جلوگیری از وقفه در استعلام‌ها، همین حالا تمدید کنید؛ مدت جدید به انتهای اشتراک "
-                    "فعلی اضافه می‌شود و روزی از دست نمی‌رود." + office_note)
+                    "فعلی اضافه می‌شود و روزی از دست نمی‌رود.")
         else:
             text = (f"🔔 {title} شما در تاریخ {fa_date(exp)} به پایان رسید.\n"
-                    "برای ادامهٔ استفاده از سامانه، اشتراک را تمدید کنید." + office_note)
+                    "برای ادامهٔ استفاده از سامانه، اشتراک را تمدید کنید.")
         try:
             await bot.send_message(uid, text, reply_markup=_renew_kb())
             sent += 1

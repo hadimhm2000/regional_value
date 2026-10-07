@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""تست‌های پایگاه داده، کنترل دسترسی، اشتراک دفتری، یادآوری تمدید و سوابق — اجرا: pytest"""
+"""تست‌های پایگاه داده، کنترل دسترسی، یادآوری تمدید و سوابق — اجرا: pytest"""
 import asyncio
 import json
 import os
@@ -71,57 +71,6 @@ def test_expired_subscription_is_not_active():
     db.execute("INSERT INTO subscriptions(user_id, plan, expires_at, updated_at) VALUES (8,'monthly',?,?)",
                (time.time() - 10, time.time()))
     assert run(ac.get_subscription(8)) is None
-
-
-# ══════════════════════════════════════════════════════════════════
-# اشتراک دفتری
-# ══════════════════════════════════════════════════════════════════
-def test_office_member_gets_access_through_owner():
-    run(ac.activate_subscription(100, "yearly", 365))
-    office = run(ac.get_or_create_office(100))
-    status, owner = run(ac.join_office(200, office["invite_code"].lower(), "همکار", max_members=2))
-    assert (status, owner) == ("ok", 100)
-    sub = run(ac.get_subscription(200))
-    assert sub and sub["office_owner"] == 100
-
-
-def test_office_join_statuses_and_capacity():
-    run(ac.activate_subscription(100, "yearly", 365))
-    code = run(ac.get_or_create_office(100))["invite_code"]
-    assert run(ac.join_office(100, code, "", 1))[0] == "self"
-    assert run(ac.join_office(201, "ZZZZZZ", "", 1))[0] == "invalid"
-    assert run(ac.join_office(201, code, "", 1))[0] == "ok"
-    assert run(ac.join_office(201, code, "", 1))[0] == "already"
-    assert run(ac.join_office(202, code, "", 1))[0] == "full"
-    # کد با ارقام فارسی / بدون خط تیره هم پذیرفته می‌شود
-    fa = code.replace("-", "").translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
-    assert run(ac.remove_office_member(100, 201))
-    assert run(ac.join_office(202, fa, "", 1))[0] == "ok"
-
-
-def test_member_loses_access_when_owner_expires_and_old_code_dies_after_reset():
-    db.execute("INSERT INTO subscriptions(user_id, plan, expires_at, updated_at) VALUES (100,'monthly',?,?)",
-               (time.time() + 100, time.time()))
-    code = run(ac.get_or_create_office(100))["invite_code"]
-    run(ac.join_office(300, code, "", 3))
-    assert run(ac.get_subscription(300)) is not None
-    db.execute("UPDATE subscriptions SET expires_at=? WHERE user_id=100", (time.time() - 1,))
-    assert run(ac.get_subscription(300)) is None
-    assert run(ac.office_membership(300))["owner_active"] is False
-    new = run(ac.reset_invite_code(100))
-    assert new != code
-    assert run(ac.join_office(301, code, "", 3))[0] == "invalid"
-
-
-def test_member_of_one_office_cannot_join_another():
-    for owner in (100, 101):
-        run(ac.activate_subscription(owner, "monthly", 30))
-    c1 = run(ac.get_or_create_office(100))["invite_code"]
-    c2 = run(ac.get_or_create_office(101))["invite_code"]
-    run(ac.join_office(400, c1, "", 3))
-    assert run(ac.join_office(400, c2, "", 3))[0] == "other_office"
-    assert run(ac.leave_office(400)) == 100
-    assert run(ac.join_office(400, c2, "", 3))[0] == "ok"
 
 
 # ══════════════════════════════════════════════════════════════════

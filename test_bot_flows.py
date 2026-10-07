@@ -5,7 +5,7 @@
 
 پوشش: فرم کامل استعلام با storage پایدار، ثبت در سوابق با کد رهگیری، QR/کد روی PDF،
 دریافت دوبارهٔ PDF، بررسی اصالت (دکمه و لینک /start)، گزارش تجمیعی دو ملک،
-محاسبهٔ مجدد از سوابق، اشتراک دفتری و یادآوری تمدید.
+محاسبهٔ مجدد از سوابق، یادآوری تمدید و اکسل اشتراک‌ها.
 """
 import asyncio
 import datetime
@@ -303,49 +303,6 @@ def test_recalculate_from_history_goes_to_preview(h):
     run(go())
 
 
-def test_office_invite_flow_gives_colleague_access(h):
-    async def go():
-        await access_control.activate_subscription(USER, "yearly", 365)
-        await h.send("👤 حساب کاربری و اشتراک")
-        assert ("👥 همکاران دفتر (۰ از ۳)", "acc:office") in h.last_inline()
-        await h.click("acc:office")
-        code = (await access_control.get_or_create_office(USER))["invite_code"]
-        assert code in h.session.last().text
-
-        # همکار بدون اشتراک ابتدا صفحهٔ معرفی/تست را می‌بیند
-        await h.send("🗺️ استعلام ارزش منطقه‌ای ملک", uid=COLLEAGUE)
-        assert (await h.state(COLLEAGUE)).endswith("waiting_intro")
-        # عضویت با لینک دعوت
-        await h.send(f"/start j_{code.replace('-', '')}", uid=COLLEAGUE)
-        assert "عضو اشتراک دفتر شدید" in h.session.texts()[-2] or \
-            any("عضو اشتراک دفتر شدید" in (t or "") for t in h.session.texts()[-3:])
-        assert any("پیوست" in (t or "") for t in h.session.texts()[-3:])  # اطلاع به مدیر
-        await h.send("🗺️ استعلام ارزش منطقه‌ای ملک", uid=COLLEAGUE)
-        assert (await h.state(COLLEAGUE)).endswith("waiting_province")
-        await h.fill_form(uid=COLLEAGUE, building=False)
-        await h.send("✅ تایید و ادامه", uid=COLLEAGUE)
-        assert history.count_user_queries(COLLEAGUE) == 1
-
-        # مدیر همکار را حذف می‌کند → دسترسی قطع
-        await h.click(f"om_rm:{COLLEAGUE}")
-        assert await access_control.get_subscription(COLLEAGUE) is None
-    run(go())
-
-
-def test_join_by_typing_code_and_wrong_code(h):
-    async def go():
-        await access_control.activate_subscription(USER, "monthly", 30)
-        code = (await access_control.get_or_create_office(USER))["invite_code"]
-        await h.click("acc:join", uid=COLLEAGUE)
-        await h.send("XXXXXX", uid=COLLEAGUE)
-        assert "نامعتبر" in h.session.last().text
-        assert (await h.state(COLLEAGUE)).endswith("waiting_invite_code")
-        await h.send(code, uid=COLLEAGUE)
-        assert await access_control.get_subscription(COLLEAGUE) is not None
-        assert await h.state(COLLEAGUE) is None
-    run(go())
-
-
 def test_renew_reminder_and_renew_button(h):
     async def go():
         import menu_handlers
@@ -379,4 +336,58 @@ def test_payment_is_recorded_for_stats(h):
         assert "۱٬۲۰۰٬۰۰۰" in text or "۱,۲۰۰,۰۰۰" in text
         await h.send("/stats", uid=ADMIN)
         assert "آمار ربات" in h.session.last().text
+    run(go())
+
+
+def test_admin_subscription_excel_roundtrip(h, monkeypatch):
+    async def go():
+        import os
+        import shutil
+        import tempfile
+        from aiogram.types import Document
+        from openpyxl import load_workbook
+        import admin_commands
+        import subs_admin
+
+        # خریدار قبلی + /office
+        await access_control.activate_subscription(USER, "monthly", 30)
+        await h.send(f"/office {USER} 4321 دفتر خدمات الکترونیک قضایی شمارهٔ ۷", uid=ADMIN)
+        assert "شمارهٔ ۷" in h.session.last().text
+        # غیرادمین نمی‌تواند
+        await h.send(f"/office {USER} 1 x", uid=USER)
+        assert access_control.get_office_info(USER)["office_code"] == "4321"
+
+        # /subs_excel → فایل اکسل (ارسال مستقیم شبیه‌سازی می‌شود)
+        sent = {}
+
+        async def fake_send(chat_id, file_path, filename=None, caption=None, reply_markup=None):
+            sent["path"] = shutil.copy(file_path, tempfile.mkdtemp())
+            sent["caption"] = caption
+            return True
+        monkeypatch.setattr("bale_file_sender.send_document_direct", fake_send)
+        await h.send("/subs_excel", uid=ADMIN)
+        wb = load_workbook(sent["path"])
+        ws = wb[subs_admin.SHEET_TITLE]
+        assert ws.cell(2, subs_admin.IDX["office_name"] + 1).value == "دفتر خدمات الکترونیک قضایی شمارهٔ ۷"
+        # ادمین یک اشتراک دستی جدید اضافه می‌کند
+        ws.append([COLLEAGUE, "دفتر جدید", "9999", "دستی", "", 60])
+        wb.save(sent["path"])
+
+        async def fake_download(file, destination=None, **kw):
+            shutil.copy(sent["path"], destination)
+        monkeypatch.setattr(h.bot, "download", fake_download)
+        doc = Document(file_id="f1", file_unique_id="u1", file_name="اشتراک‌ها.xlsx")
+        msg = Message(message_id=900, date=datetime.datetime.now(), chat=Chat(id=ADMIN, type="private"),
+                      from_user=User(id=ADMIN, is_bot=False, first_name="admin"), document=doc)
+        await h.dp.feed_update(h.bot, Update(update_id=9000, message=msg))
+        preview = h.session.last().text
+        assert "پیش‌نمایش تغییرات اشتراک‌ها" in preview and str(COLLEAGUE) in preview
+        assert await access_control.get_subscription(COLLEAGUE) is None  # هنوز اعمال نشده
+
+        await h.click("subs_apply", uid=ADMIN)
+        assert await access_control.get_subscription(COLLEAGUE) is not None
+        assert access_control.get_office_info(COLLEAGUE)["office_name"] == "دفتر جدید"
+        texts = h.session.texts()
+        assert any("توسط مدیر سامانه" in (t or "") for t in texts)  # اطلاع به کاربر
+        assert "ثبت شد" in texts[-1]
     run(go())

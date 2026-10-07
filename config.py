@@ -72,12 +72,8 @@ FREE_RETRY_FILE = os.path.join(DATA_DIR, "free_retries.json")
 SUBSCRIPTIONS_FILE = os.path.join(DATA_DIR, "subscriptions.json")
 TRIAL_REQUESTS_FILE = os.path.join(DATA_DIR, "trial_requests.json")
 
-# نام کاربری ربات در بله (بدون @) — برای لینک QR تأیید اصالت و لینک دعوت همکار
+# نام کاربری ربات در بله (بدون @) — برای لینک QR تأیید اصالت
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "Regionalvalue_bot").lstrip("@")
-
-# ═══ اشتراک دفتری ═══
-# حداکثر تعداد همکارانی که مدیر دفتر می‌تواند به اشتراک خود اضافه کند (بدون احتساب خود مدیر)
-OFFICE_MAX_MEMBERS = int(os.environ.get("OFFICE_MAX_MEMBERS", "3"))
 
 # ═══ یادآوری تمدید ═══
 # چند روز قبل از پایان اشتراک یادآوری ارسال شود
@@ -90,3 +86,6 @@ RENEW_CHECK_INTERVAL = int(os.environ.get("RENEW_CHECK_INTERVAL", "3600"))
 HISTORY_PAGE_SIZE = int(os.environ.get("HISTORY_PAGE_SIZE", "10"))
 # حداکثر تعداد ملک در یک گزارش تجمیعی
 BATCH_MAX_ITEMS = int(os.environ.get("BATCH_MAX_ITEMS", "15"))
+
+# فایل اکسل اشتراک‌ها که پس از هر خرید/تغییر اشتراک خودکار به‌روز می‌شود (همان خروجی /subs_excel)
+SUBS_EXCEL_PATH = os.environ.get("SUBS_EXCEL_PATH", os.path.join(DATA_DIR, "subscriptions.xlsx"))

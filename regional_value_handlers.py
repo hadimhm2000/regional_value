@@ -1988,7 +1988,14 @@ async def rv_successful_payment(message: Message, state: FSMContext, bot: Bot):
         db.log_event("payment", user_id, plan_key)
     except Exception as e:
         logger.error(f"[RV] ثبت پرداخت کاربر {user_id} در پایگاه داده ناموفق: {e}", exc_info=True)
-    await _notify_admin(bot, f"💳 خرید {plan['title']} — کاربر {getattr(message.from_user, 'full_name', '')} ({user_id})")
+    office = access_control.get_office_info(user_id)
+    await _notify_admin(
+        bot,
+        f"💳 خرید {plan['title']} — کاربر {getattr(message.from_user, 'full_name', '')} ({user_id})\n"
+        f"🏢 دفتر: {office.get('office_name') or 'ثبت نشده'} — کد: {office.get('office_code') or 'ثبت نشده'}\n"
+        "این خرید در اکسل اشتراک‌ها (/subs_excel) ثبت شد"
+        + ("" if office.get("office_name") else f"؛ ثبت نام دفتر: /office {user_id} کد_دفتر نام_دفتر"),
+    )
     expiry = _jalali_date(sub["expires_at"])
     head = f"✅ پرداخت تایید شد و {plan['title']} شما تا {expiry} فعال است."
     if _form_complete(await state.get_data()):

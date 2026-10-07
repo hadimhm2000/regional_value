@@ -1,16 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-کنترل دسترسی: کاربران تاییدشدهٔ ادمین، اعتبار استعلام رایگان، اشتراک
-(شخصی و دفتری)، درخواست‌های تست — همه روی SQLite (db.py).
+کنترل دسترسی: کاربران تاییدشدهٔ ادمین، اعتبار استعلام رایگان، اشتراک،
+مشخصات دفتر هر مشترک (نام و کد دفتر خدمات قضایی) و درخواست‌های تست —
+همه روی SQLite (db.py).
 
 توابع async مانده‌اند تا امضای قبلی حفظ شود؛ خود عملیات SQLite کوتاه و
 تراکنشی است.
-
-اشتراک دفتری:
-  مدیر دفتر (کاربری که خودش اشتراک فعال دارد یا تاییدشدهٔ ادمین است) یک
-  «کد دعوت» دریافت می‌کند. همکاران با این کد عضو دفتر می‌شوند و تا وقتی
-  دسترسی مدیر فعال است، بدون اشتراک جداگانه استعلام می‌گیرند.
-  حداکثر تعداد اعضا: config.OFFICE_MAX_MEMBERS.
 """
 from __future__ import annotations
 
@@ -92,22 +87,8 @@ async def get_own_subscription(user_id: int):
 
 
 async def get_subscription(user_id: int):
-    """
-    اشتراک فعالی که کاربر از آن استفاده می‌کند یا None:
-    اشتراک خودش؛ وگرنه اشتراک مدیر دفتری که کاربر عضو آن است
-    (در این حالت کلید office_owner هم برگردانده می‌شود).
-    """
-    own = _own_subscription(user_id)
-    if own:
-        return own
-    owner = _office_owner_of(user_id)
-    if owner is not None:
-        if await is_approved(owner):
-            return {"plan": "office", "expires_at": float("inf"), "office_owner": owner}
-        osub = _own_subscription(owner)
-        if osub:
-            return {**osub, "office_owner": owner}
-    return None
+    """اشتراک فعال کاربر یا None."""
+    return _own_subscription(user_id)
 
 
 async def activate_subscription(user_id: int, plan: str, days: int) -> dict:
@@ -121,12 +102,64 @@ async def activate_subscription(user_id: int, plan: str, days: int) -> dict:
                   "ON CONFLICT(user_id) DO UPDATE SET plan=excluded.plan, expires_at=excluded.expires_at, "
                   "updated_at=excluded.updated_at", (int(user_id), plan, expires, now))
     logger.info(f"[ACCESS] اشتراک {plan} ({days} روز) برای کاربر {user_id} فعال شد")
+    refresh_subs_excel()
     return {"plan": plan, "expires_at": expires, "updated_at": now}
+
+
+def refresh_subs_excel() -> None:
+    """به‌روزرسانی فایل اکسل اشتراک‌ها روی دیسک (هر خریدار جدید خودکار در اکسل می‌آید)."""
+    try:
+        import subs_admin
+        subs_admin.refresh_file()
+    except Exception as e:  # اکسل نباید فعال‌سازی اشتراک را بشکند
+        logger.warning(f"[ACCESS] به‌روزرسانی فایل اکسل اشتراک‌ها ناموفق: {e}")
 
 
 async def list_subscriptions() -> dict:
     return {str(r["user_id"]): dict(r) for r in
             db.query("SELECT user_id, plan, expires_at, updated_at FROM subscriptions")}
+
+
+async def set_subscription_expiry(user_id: int, plan: str, expires_at: float) -> None:
+    """تنظیم مستقیم تاریخ پایان اشتراک (ثبت/ویرایش دستی ادمین از اکسل)."""
+    db.execute("INSERT INTO subscriptions(user_id, plan, expires_at, updated_at) VALUES (?,?,?,?) "
+               "ON CONFLICT(user_id) DO UPDATE SET plan=excluded.plan, expires_at=excluded.expires_at, "
+               "updated_at=excluded.updated_at", (int(user_id), plan, float(expires_at), time.time()))
+    logger.info(f"[ACCESS] تاریخ پایان اشتراک کاربر {user_id} دستی تنظیم شد ({plan})")
+
+
+PLAN_TITLES = {"monthly": "اشتراک ماهانه", "yearly": "اشتراک سالانه", "manual": "اشتراک دستی (ادمین)"}
+
+
+def plan_title(plan: str) -> str:
+    return PLAN_TITLES.get(plan or "", plan or "اشتراک")
+
+
+# ══════════════════════════════════════════════════════════════════
+# مشخصات دفتر هر مشترک (نام و کد دفتر خدمات قضایی — ثبت ادمین)
+# ══════════════════════════════════════════════════════════════════
+def get_office_info(user_id: int) -> dict:
+    """{"office_name", "office_code", "note"}؛ اگر ادمین کد دفتر را ثبت نکرده، کد درخواست تست."""
+    r = db.query_one("SELECT office_name, office_code, note FROM subscriber_info WHERE user_id=?", (int(user_id),))
+    info = dict(r) if r else {"office_name": None, "office_code": None, "note": None}
+    if not info.get("office_code"):
+        tr = db.query_one("SELECT office_code FROM trial_requests WHERE user_id=?", (int(user_id),))
+        if tr and tr["office_code"]:
+            info["office_code"] = tr["office_code"]
+    return info
+
+
+def set_office_info(user_id: int, office_name=None, office_code=None, note=None) -> None:
+    """ثبت/ویرایش نام و کد دفتر؛ مقدار None یعنی آن فیلد تغییر نکند."""
+    cur = db.query_one("SELECT office_name, office_code, note FROM subscriber_info WHERE user_id=?",
+                       (int(user_id),))
+    cur = dict(cur) if cur else {"office_name": None, "office_code": None, "note": None}
+    vals = {"office_name": office_name, "office_code": office_code, "note": note}
+    merged = {k: (cur[k] if v is None else (v.strip() or None)) for k, v in vals.items()}
+    db.execute("INSERT INTO subscriber_info(user_id, office_name, office_code, note, updated_at) VALUES (?,?,?,?,?) "
+               "ON CONFLICT(user_id) DO UPDATE SET office_name=excluded.office_name, "
+               "office_code=excluded.office_code, note=excluded.note, updated_at=excluded.updated_at",
+               (int(user_id), merged["office_name"], merged["office_code"], merged["note"], time.time()))
 
 
 def record_payment(user_id: int, plan: str, amount_rial: int, charge_id: str = "") -> None:
@@ -156,106 +189,6 @@ def due_renew_reminders(soon_days: int, now: float | None = None) -> list:
 def mark_reminded(user_id: int, kind: str, expires_at: float) -> None:
     col = "reminded_soon" if kind == "soon" else "reminded_end"
     db.execute(f"UPDATE subscriptions SET {col}=? WHERE user_id=?", (expires_at, int(user_id)))
-
-
-# ══════════════════════════════════════════════════════════════════
-# اشتراک دفتری
-# ══════════════════════════════════════════════════════════════════
-def _office_owner_of(user_id: int):
-    r = db.query_one("SELECT owner_id FROM office_members WHERE user_id=?", (int(user_id),))
-    return r["owner_id"] if r else None
-
-
-async def office_membership(user_id: int):
-    """اگر کاربر عضو دفتری است: {"owner_id", "owner_active"}؛ وگرنه None."""
-    owner = _office_owner_of(user_id)
-    if owner is None:
-        return None
-    return {"owner_id": owner, "owner_active": await can_own_office(owner)}
-
-
-async def can_own_office(user_id: int) -> bool:
-    """مدیر دفتر می‌تواند باشد اگر خودش اشتراک فعال دارد یا تاییدشدهٔ ادمین است."""
-    return await is_approved(user_id) or _own_subscription(user_id) is not None
-
-
-async def get_or_create_office(owner_id: int) -> dict:
-    r = db.query_one("SELECT * FROM offices WHERE owner_id=?", (int(owner_id),))
-    if r:
-        return dict(r)
-    tr = db.query_one("SELECT office_code FROM trial_requests WHERE user_id=?", (int(owner_id),))
-    for _ in range(5):
-        code = db.new_code("OF", 6).replace("OF-", "")
-        try:
-            db.execute("INSERT INTO offices(owner_id, office_code, invite_code, created_at) VALUES (?,?,?,?)",
-                       (int(owner_id), tr["office_code"] if tr else None, code, time.time()))
-            break
-        except Exception:
-            continue
-    return dict(db.query_one("SELECT * FROM offices WHERE owner_id=?", (int(owner_id),)))
-
-
-async def reset_invite_code(owner_id: int) -> str:
-    await get_or_create_office(owner_id)
-    code = db.new_code("OF", 6).replace("OF-", "")
-    db.execute("UPDATE offices SET invite_code=? WHERE owner_id=?", (code, int(owner_id)))
-    return code
-
-
-async def list_office_members(owner_id: int) -> list:
-    return [dict(r) for r in db.query(
-        "SELECT user_id, full_name, added_at FROM office_members WHERE owner_id=? ORDER BY added_at",
-        (int(owner_id),))]
-
-
-def normalize_invite(text: str) -> str:
-    t = (text or "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
-    return "".join(ch for ch in t.upper() if ch.isalnum()).removeprefix("OF")
-
-
-async def join_office(user_id: int, invite_code: str, full_name: str, max_members: int) -> tuple:
-    """
-    عضویت با کد دعوت. خروجی (status, owner_id):
-      ok | invalid | self | already | other_office | full | owner_inactive
-    """
-    code = normalize_invite(invite_code)
-    if not code:
-        return "invalid", None
-    with db.tx() as c:
-        off = c.execute("SELECT owner_id FROM offices WHERE replace(invite_code,'-','')=?", (code,)).fetchone()
-        if not off:
-            return "invalid", None
-        owner = off["owner_id"]
-        if owner == int(user_id):
-            return "self", owner
-        cur = c.execute("SELECT owner_id FROM office_members WHERE user_id=?", (int(user_id),)).fetchone()
-        if cur and cur["owner_id"] == owner:
-            return "already", owner
-        if cur:
-            return "other_office", cur["owner_id"]
-        n = c.execute("SELECT COUNT(*) FROM office_members WHERE owner_id=?", (owner,)).fetchone()[0]
-        if n >= max_members:
-            return "full", owner
-        c.execute("INSERT INTO office_members(user_id, owner_id, full_name, added_at) VALUES (?,?,?,?)",
-                  (int(user_id), owner, full_name or "", time.time()))
-    if not await can_own_office(owner):
-        # عضویت ثبت می‌شود ولی تا تمدید اشتراک مدیر، دسترسی ندارد
-        return "owner_inactive", owner
-    logger.info(f"[OFFICE] کاربر {user_id} عضو دفتر {owner} شد")
-    return "ok", owner
-
-
-async def remove_office_member(owner_id: int, member_id: int) -> bool:
-    return db.execute("DELETE FROM office_members WHERE owner_id=? AND user_id=?",
-                      (int(owner_id), int(member_id))) > 0
-
-
-async def leave_office(user_id: int):
-    """خروج از دفتر؛ خروجی: owner_id قبلی یا None."""
-    owner = _office_owner_of(user_id)
-    if owner is not None:
-        db.execute("DELETE FROM office_members WHERE user_id=?", (int(user_id),))
-    return owner
 
 
 # ══════════════════════════════════════════════════════════════════
