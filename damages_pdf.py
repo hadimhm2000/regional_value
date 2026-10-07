@@ -15,7 +15,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Spacer, Table, TableStyle
 
 from ayani_pdf import (
-    CONTENT_W, MARGIN, PAGE_H, PAGE_W, PAL_CLASSIC, _FONTS, _draw_ltr, _draw_rtl,
+    CONTENT_W, MARGIN, PAGE_H, PAGE_W, PAL_CLASSIC, _FONTS, _draw_issuer, _draw_ltr, _draw_rtl,
     _ensure_fonts, _footer_line, _kv, _money, _p, num_to_words,
 )
 
@@ -100,7 +100,8 @@ def _build(output_path: str, ctx: dict) -> bool:
         c.rect(9.6 * mm, top - band_h - 1.1 * mm, PAGE_W - 19.2 * mm, 1.1 * mm, stroke=0, fill=1)
         rx, lx = PAGE_W - MARGIN - 2 * mm, MARGIN + 2 * mm
         _draw_rtl(c, rx, top - 13 * mm, ctx["title"], _FONTS["bold"], 17, colors.white)
-        _draw_rtl(c, rx, top - 21 * mm, ctx["subtitle"], _FONTS["regular"], 9.5, colors.HexColor("#C8D3E6"))
+        _draw_rtl(c, rx, top - 20 * mm, ctx["subtitle"], _FONTS["regular"], 9.5, colors.HexColor("#C8D3E6"))
+        _draw_issuer(c, rx, top - 27 * mm, ctx.get("issuer"))
         _draw_ltr(c, lx, top - 11 * mm, f"تاریخ: {date_text}", _FONTS["regular"], 8.5, colors.white)
         _draw_ltr(c, lx, top - 17 * mm, f"ساعت: {time_text}", _FONTS["regular"], 8.5, colors.white)
         _draw_ltr(c, lx, top - 23 * mm, f"شماره: {ctx['report_no']}", _FONTS["regular"], 8.5,
@@ -171,7 +172,7 @@ def _build(output_path: str, ctx: dict) -> bool:
 # ══════════════════════════════════════════════════════════════════
 # خسارت تأخیر تأدیه
 # ══════════════════════════════════════════════════════════════════
-def build_late_payment_pdf(output_path: str, r: dict, due: tuple, pay: tuple) -> bool:
+def build_late_payment_pdf(output_path: str, r: dict, due: tuple, pay: tuple, issuer: str = None) -> bool:
     """r: خروجی damages_calc.calc_late_payment؛ due/pay: تاریخ‌های (سال، ماه، روز)."""
     notes = [
         "ارزش ریالی دین در زمان پرداخت برابر است با عدد شاخص زمان پرداخت تقسیم بر عدد شاخص "
@@ -201,6 +202,7 @@ def build_late_payment_pdf(output_path: str, r: dict, due: tuple, pay: tuple) ->
         "words": num_to_words(r["updated_amount"]),
         "notes": notes,
         "law": ART_522,
+        "issuer": issuer,
     }
     return _build(output_path, ctx)
 
@@ -208,7 +210,7 @@ def build_late_payment_pdf(output_path: str, r: dict, due: tuple, pay: tuple) ->
 # ══════════════════════════════════════════════════════════════════
 # مهریه به نرخ روز
 # ══════════════════════════════════════════════════════════════════
-def build_mahrieh_pdf(output_path: str, r: dict) -> bool:
+def build_mahrieh_pdf(output_path: str, r: dict, issuer: str = None) -> bool:
     """r: خروجی damages_calc.calc_mahrieh"""
     ctx = {
         "title": "گزارش محاسبهٔ مهریه به نرخ روز",
@@ -232,5 +234,6 @@ def build_mahrieh_pdf(output_path: str, r: dict) -> bool:
             f"شاخص سالانه = میانگین شاخص ماهانهٔ بانک مرکزی همان سال (سال پایهٔ {r['cpi_base']}).",
         ],
         "law": ART_1082,
+        "issuer": issuer,
     }
     return _build(output_path, ctx)

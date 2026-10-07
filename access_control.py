@@ -195,6 +195,26 @@ def get_office_info(user_id: int) -> dict:
     return info
 
 
+def issuer_line(user_id: int):
+    """
+    متن «صادرکننده» برای سربرگ PDFها: نام و کد دفتر خدمات قضایی کاربر (ثبت ادمین یا کد درخواست تست).
+    اگر هیچ‌کدام ثبت نشده باشد None.
+    """
+    try:
+        info = get_office_info(user_id)
+    except Exception:
+        return None
+    name = (info.get("office_name") or "").strip()
+    code = (info.get("office_code") or "").strip()
+    if not name and not code:
+        return None
+    if name and not name.startswith("دفتر"):
+        name = f"دفتر خدمات الکترونیک قضایی {name}"
+    if not name:
+        name = "دفتر خدمات الکترونیک قضایی"
+    return f"صادرکننده: {name}" + (f" — کد {code}" if code else "")
+
+
 def set_office_info(user_id: int, office_name=None, office_code=None, note=None) -> None:
     """ثبت/ویرایش نام و کد دفتر؛ مقدار None یعنی آن فیلد تغییر نکند."""
     cur = db.query_one("SELECT office_name, office_code, note FROM subscriber_info WHERE user_id=?",

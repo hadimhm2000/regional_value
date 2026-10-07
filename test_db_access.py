@@ -165,3 +165,13 @@ def test_sqlite_fsm_storage_roundtrip():
         await s2.set_data(k, {})
         assert db.query_one("SELECT COUNT(*) n FROM fsm")["n"] == 0
     run(go())
+
+
+def test_issuer_line():
+    assert ac.issuer_line(1) is None
+    run(ac.save_trial_request(1, "4321", "0012345678"))
+    assert ac.issuer_line(1) == "صادرکننده: دفتر خدمات الکترونیک قضایی — کد 4321"
+    ac.set_office_info(1, office_name="شمارهٔ ۱۲ تهران")
+    assert ac.issuer_line(1) == "صادرکننده: دفتر خدمات الکترونیک قضایی شمارهٔ ۱۲ تهران — کد 4321"
+    ac.set_office_info(2, office_name="دفتر خدمات قضایی آرمان", office_code="99")
+    assert ac.issuer_line(2) == "صادرکننده: دفتر خدمات قضایی آرمان — کد 99"

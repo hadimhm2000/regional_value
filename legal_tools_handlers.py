@@ -19,6 +19,7 @@ from aiogram import F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+import access_control
 import diyeh_calc as dyc
 import inheritance_calc as ic
 from utilities_handlers import (BACK_TEXT, ENTRY, MAIN_MENU_TEXT, UtilForm, _back_to_menu, _fa, _gate,
@@ -342,7 +343,8 @@ async def _finish_diyeh(message: Message, state: FSMContext, dy: dict, retry_on_
     await message.answer(dyc.format_result_fa(r))
     if r["amount"] is not None:
         import legal_pdf
-        await _send_pdf(message, lambda p: legal_pdf.build_diyeh_pdf(p, r), "محاسبه_دیه.pdf",
+        issuer = access_control.issuer_line(message.chat.id)
+        await _send_pdf(message, lambda p: legal_pdf.build_diyeh_pdf(p, r, issuer=issuer), "محاسبه_دیه.pdf",
                         f"📄 گزارش محاسبهٔ دیه — {r['amount']:,} ریال")
     await state.update_data(dy={"year": dy["year"]})
     await _ask_method(message, state)
@@ -608,7 +610,8 @@ async def inh_estate(message: Message, state: FSMContext):
     _used(message.chat.id, "inheritance", inh["marital"])
     await message.answer(ic.format_result_fa(r))
     import legal_pdf
-    await _send_pdf(message, lambda p: legal_pdf.build_inheritance_pdf(p, r), "سهم_الارث.pdf",
+    issuer = access_control.issuer_line(message.chat.id)
+    await _send_pdf(message, lambda p: legal_pdf.build_inheritance_pdf(p, r, issuer=issuer), "سهم_الارث.pdf",
                     "📄 گزارش تقسیم ترکه (سهم‌الارث)")
     await inheritance_entry(message, state, "برای محاسبهٔ دیگر:\n\n")
 

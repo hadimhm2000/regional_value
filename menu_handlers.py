@@ -264,6 +264,7 @@ async def send_query_pdf(user_id: int, q: dict) -> bool:
             path, province=q["province"] or "", county=q["county"] or "", address=q["address"] or "",
             tax_result=q["tax_result"], result=q["calc"], plak=q.get("plak"), date_text=date_text,
             time_text=time_text, report_no=q["code"], verify_url=verify_url(q["code"]),
+            issuer=q.get("issuer") or access_control.issuer_line(user_id),
         )), timeout=_PDF_TIMEOUT_SECONDS)
         if not ok:
             return False
@@ -357,7 +358,8 @@ async def _send_batch_pdf(message: Message, user_id: int, batch: str):
     total = sum(int(it["total"] or 0) for it in items)
     try:
         ok = await asyncio.wait_for(loop.run_in_executor(
-            None, lambda: build_batch_pdf(path, batch, items, verify_url_for=verify_url)),
+            None, lambda: build_batch_pdf(path, batch, items, verify_url_for=verify_url,
+                                          issuer=access_control.issuer_line(user_id))),
             timeout=_PDF_TIMEOUT_SECONDS + 20 * len(items))
         sent = ok and await send_document_direct(
             chat_id=user_id, file_path=path, filename=f"گزارش_تجمیعی_{batch}.pdf",
@@ -441,7 +443,8 @@ async def _verify_and_reply(message: Message, raw: str, keep_waiting: bool = Fal
     await message.answer(
         "✅ *این گزارش معتبر است* و توسط سامانهٔ استعلام ارزش منطقه‌ای صادر شده است.\n\n"
         f"🔖 کد رهگیری: {code}\n"
-        f"📅 تاریخ صدور: {fa_date(q['created_at'], with_time=True)}\n"
+        + (f"🏢 {q['issuer']}\n" if q.get("issuer") else "")
+        + f"📅 تاریخ صدور: {fa_date(q['created_at'], with_time=True)}\n"
         f"📍 {q['province'] or '-'} — {q['county'] or '-'}\n"
         f"🗺 آدرس: {q['address'] or '-'}\n"
         + (f"🧾 پلاک ثبتی: {q['plak']}\n" if q.get("plak") else "")

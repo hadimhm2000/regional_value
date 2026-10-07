@@ -50,9 +50,10 @@ def form_inputs(data: dict) -> dict:
 
 # ══════════════════════════════════════════════════════════════════
 def save_query(user_id: int, data: dict, *, province: str, county: str, address: str, calc: dict,
-               tax_result: dict, plak: str | None, has_building: bool, batch_code: str | None = None) -> str:
-    """ثبت استعلام موفق؛ خروجی: کد رهگیری."""
-    extra = {"plak": plak, "has_building": has_building}
+               tax_result: dict, plak: str | None, has_building: bool, batch_code: str | None = None,
+               issuer: str | None = None) -> str:
+    """ثبت استعلام موفق؛ خروجی: کد رهگیری. issuer: دفتر صادرکننده (همان که روی PDF چاپ شده)."""
+    extra = {"plak": plak, "has_building": has_building, "issuer": issuer}
     for _ in range(5):
         code = db.new_code("RV")
         try:
@@ -76,6 +77,7 @@ def _row_to_dict(r) -> dict:
         d[k] = loads(d.get(k)) or {}
     d["plak"] = d["extra"].get("plak")
     d["has_building"] = d["extra"].get("has_building", True)
+    d["issuer"] = d["extra"].get("issuer")
     return d
 
 

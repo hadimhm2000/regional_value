@@ -2259,11 +2259,12 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
         # ── ثبت در سوابق با کد رهگیری (خطای پایگاه داده نباید مانع تحویل نتیجه شود) ──
         code = None
         batch_code = data.get("rv_batch")
+        issuer = access_control.issuer_line(user_id)   # نام و کد دفتر روی PDF
         try:
             code = history.save_query(
                 user_id, data, province=province, county=county_label, address=address, calc=calc,
                 tax_result=tax_result, plak=data.get("rv_plak_text") or None, has_building=has_building,
-                batch_code=batch_code,
+                batch_code=batch_code, issuer=issuer,
             )
             db.log_event("query_ok", user_id, code)
         except Exception as e:
@@ -2293,6 +2294,7 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
             "refund_credit": refund_credit,
             "code": code,
             "batch_code": batch_code,
+            "issuer": issuer,
         }
         if await _build_and_send_pdf(bot, job):
             await _send_after_result(bot, user_id, code, batch_code)
@@ -2357,6 +2359,7 @@ async def _build_and_send_pdf(bot: Bot, job: dict) -> bool:
                         lambda: _build_pdf_sync(
                             pdf_path, job["province"], job["county"], job["address"],
                             job["tax_result"], job["calc"], plak=job["plak"], code=job.get("code"),
+                            issuer=job.get("issuer"),
                         ),
                     ),
                     timeout=_STEP_TIMEOUT_SECONDS,
@@ -2502,12 +2505,12 @@ def verify_url(code: str) -> str:
     return f"https://ble.ir/{BOT_USERNAME}?start=v_{code.replace('-', '')}"
 
 
-def _build_pdf_sync(pdf_path, province, county, address, tax_result, calc, plak=None, code=None):
+def _build_pdf_sync(pdf_path, province, county, address, tax_result, calc, plak=None, code=None, issuer=None):
     from ayani_pdf import build_ayani_pdf
     return build_ayani_pdf(
         pdf_path, province=province, county=county, address=address,
         tax_result=tax_result, result=calc, plak=plak,
-        report_no=code, verify_url=verify_url(code) if code else None,
+        report_no=code, verify_url=verify_url(code) if code else None, issuer=issuer,
     )
 
 
