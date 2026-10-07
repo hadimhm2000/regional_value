@@ -722,3 +722,52 @@ def test_admin_diyeh_rate(h, monkeypatch, tmp_path):
         await h.send("/diyeh_rate 1406 1", uid=USER)          # غیرادمین اثری ندارد
         assert dyc.full_diyeh(1406) == 27_000_000_000
     run(go())
+
+
+def test_office_name_on_reports_and_verification(h, monkeypatch):
+    async def go():
+        import ayani_pdf
+        import legal_pdf
+        seen = []
+        orig_rv, orig_dy = ayani_pdf.build_ayani_pdf, legal_pdf.build_diyeh_pdf
+
+        def spy_rv(*a, **kw):
+            seen.append(("rv", kw.get("issuer")))
+            return orig_rv(*a, **kw)
+
+        def spy_dy(path, r, issuer=None):
+            seen.append(("dy", issuer))
+            return orig_dy(path, r, issuer=issuer)
+        monkeypatch.setattr(ayani_pdf, "build_ayani_pdf", spy_rv)
+        monkeypatch.setattr(legal_pdf, "build_diyeh_pdf", spy_dy)
+
+        access_control.set_office_info(USER, office_name="شمارهٔ ۷", office_code="4321")
+        expected = "صادرکننده: دفتر خدمات الکترونیک قضایی شمارهٔ ۷ — کد 4321"
+        await access_control.activate_subscription(USER, "monthly", 30)
+        await h.send("🗺️ استعلام ارزش منطقه‌ای ملک")
+        await h.fill_form(building=False)
+        await h.send("✅ تایید و ادامه")
+        assert ("rv", expected) in seen
+        code = history.list_user_queries(USER)[0]["code"]
+        assert history.get_query(code)["issuer"] == expected
+        # دریافت دوباره: همان دفتر صادرکننده (حتی اگر بعداً نام دفتر عوض شود)
+        access_control.set_office_info(USER, office_name="نام جدید")
+        seen.clear()
+        await h.click(f"hpdf:{code}")
+        assert seen == [("rv", expected)]
+        # بررسی اصالت دفتر صادرکننده را نشان می‌دهد
+        await h.send(f"/verify {code}", uid=COLLEAGUE)
+        assert expected in h.session.last().text
+
+        # PDF دیه هم نام دفتر (فعلی) را دارد
+        import diyeh_calc as dyc
+        import legal_tools_handlers as lt
+        import utilities_handlers as uh
+        await h.send("🧰 خدمات کاربردی")
+        await h.send(uh.TOOLS["diyeh"])
+        await h.send("1405")
+        await h.send(lt.DY_METHOD_BUTTONS[dyc.METHOD_HOMICIDE])
+        await h.send("👨 مرد")
+        await h.send(lt.NO)
+        assert ("dy", "صادرکننده: دفتر خدمات الکترونیک قضایی نام جدید — کد 4321") in seen
+    run(go())

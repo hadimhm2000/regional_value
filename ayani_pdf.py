@@ -218,7 +218,7 @@ def num_to_words(n: int) -> str:
 # جمع‌آوری محتوا (مشترک بین همهٔ طرح‌ها)
 # ══════════════════════════════════════════════════════════════════
 def _collect(province, county, address, tax_result, result, date_text, time_text, plak=None,
-             report_no=None, verify_url=None) -> dict:
+             report_no=None, verify_url=None, issuer=None) -> dict:
     import ownership_share as osh
     land, b = result["land"], result.get("building")
     land_share = osh.frac_from_str(result.get("land_share") or "1")
@@ -323,6 +323,7 @@ def _collect(province, county, address, tax_result, result, date_text, time_text
         "date": date_text, "time": time_text,
         "report_no": report_no or _report_no(),
         "verify_url": verify_url,
+        "issuer": issuer,
         "prop": prop, "land": land_pairs, "bld": bld,
         "land_value": result.get("land_value", land["value"]),
         "bld_value": result.get("building_value", b["value"] if b else 0),
@@ -499,6 +500,29 @@ def _draw_ltr(c, x_left, y, text, font, size, color):
     c.drawString(x_left, y, _bidi(text))
 
 
+def _draw_issuer(c, x_right, y, issuer, color=None, max_width=None):
+    """
+    سطر «صادرکننده: دفتر ... — کد ...» در سربرگ (اگر ثبت شده باشد). اگر از max_width بلندتر باشد،
+    اندازهٔ فونت تا ۶٫۸ کوچک و در صورت نیاز انتهای نام کوتاه می‌شود.
+    """
+    if not issuer:
+        return
+    max_width = max_width or (PAGE_W - 2 * MARGIN)
+    text, size = issuer, 8.6
+    width = lambda t, sz: pdfmetrics.stringWidth(_bidi(t), _FONTS["bold"], sz)  # noqa: E731
+    while size > 6.8 and width(text, size) > max_width:
+        size -= 0.2
+    if width(text, size) > max_width:
+        code = ""
+        if " — کد " in text:
+            text, code = text.rsplit(" — کد ", 1)
+            code = " — کد " + code
+        while len(text) > 10 and width(text + "…" + code, size) > max_width:
+            text = text[:-1]
+        text = text.rstrip() + "…" + code
+    _draw_rtl(c, x_right, y, text, _FONTS["bold"], size, color or colors.HexColor("#E3C77E"))
+
+
 def _draw_verify_qr(c, x, y, size, url, caption=None, color=colors.black):
     """کاشی سفید QR تأیید اصالت؛ (x, y) گوشهٔ پایین-چپ کاشی."""
     from reportlab.graphics import renderPDF
@@ -563,14 +587,17 @@ def _render_classic(ctx):
         lx = MARGIN + 2 * mm
         if doc.page == 1:
             _draw_rtl(c, rx, top - 13 * mm, "گزارش ارزش منطقه‌ای ملک", _FONTS["bold"], 18, colors.white)
-            _draw_rtl(c, rx, top - 21 * mm, f"{ctx['scope_title']} — سال {ctx['year']}", _FONTS["regular"], 9.5,
+            # کاشی QR از ۵۸ تا ۷۹٫۵ میلی‌متر؛ سطر صادرکننده نباید زیر آن برود
+            _draw_issuer(c, rx, top - 27 * mm, ctx.get("issuer"),
+                         max_width=rx - 83 * mm if ctx.get("verify_url") else None)
+            _draw_rtl(c, rx, top - 20 * mm, f"{ctx['scope_title']} — سال {ctx['year']}", _FONTS["regular"], 9.5,
                       colors.HexColor("#C8D3E6"))
             _draw_ltr(c, lx, top - 11 * mm, f"تاریخ: {ctx['date']}", _FONTS["regular"], 8.5, colors.white)
             _draw_ltr(c, lx, top - 17 * mm, f"ساعت: {ctx['time']}", _FONTS["regular"], 8.5, colors.white)
             _draw_ltr(c, lx, top - 23 * mm, f"شماره: {ctx['report_no']}", _FONTS["regular"], 8.5,
                       colors.HexColor("#E3C77E"))
             if ctx.get("verify_url"):
-                _draw_verify_qr(c, 76 * mm, top - bh + 2.2 * mm, 21.5 * mm, ctx["verify_url"],
+                _draw_verify_qr(c, 58 * mm, top - bh + 2.2 * mm, 21.5 * mm, ctx["verify_url"],
                                 caption="اسکن برای تأیید اصالت", color=P["accent"])
         else:
             _draw_rtl(c, rx, top - 12.5 * mm, "نحوهٔ محاسبه و اطلاعات مکان", _FONTS["bold"], 15, colors.white)
@@ -907,12 +934,13 @@ DESIGNS = {"classic": _render_classic, "cards": _render_cards, "minimal": _rende
 def build_ayani_pdf(output_path: str, *, province: str, county: str, address: str,
                     tax_result: dict, result: dict, date_text: str = None, time_text: str = None,
                     design: str = None, plak: str = None, report_no: str = None,
-                    verify_url: str = None) -> bool:
+                    verify_url: str = None, issuer: str = None) -> bool:
     """
     result: خروجی ayani_calc.compute_all
     tax_result: خروجی سامانهٔ مالیاتی (برای شماره بلوک/ردیف و اداره)
     report_no: کد رهگیری استعلام (ثبت‌شده در پایگاه داده) — در غیر این صورت شمارهٔ زمانی
     verify_url: لینک تأیید اصالت؛ در طرح classic به‌صورت QR در سرتیتر صفحهٔ اول چاپ می‌شود
+    issuer: «صادرکننده: دفتر ... — کد ...» (access_control.issuer_line) در سرتیتر صفحهٔ اول
     design: یکی از DESIGNS (پیش‌فرض DEFAULT_DESIGN)
     """
     _ensure_fonts()
@@ -925,7 +953,7 @@ def build_ayani_pdf(output_path: str, *, province: str, county: str, address: st
         time_text = time_text or ""
 
     ctx = _collect(province, county, address, tax_result, result, date_text, time_text, plak=plak,
-                   report_no=report_no, verify_url=verify_url)
+                   report_no=report_no, verify_url=verify_url, issuer=issuer)
     design = design if design in DESIGNS else DEFAULT_DESIGN
     try:
         if design == "sidebar":
@@ -949,7 +977,7 @@ def build_ayani_pdf(output_path: str, *, province: str, county: str, address: st
 # گزارش تجمیعی چند ملک: صفحهٔ خلاصه + گزارش کامل هر ملک (پشت سر هم)
 # ══════════════════════════════════════════════════════════════════
 def _build_batch_summary(output_path: str, batch_code: str, items: list, date_text: str, time_text: str,
-                         verify_url: str = None, total_pages: int = 1) -> None:
+                         verify_url: str = None, total_pages: int = 1, issuer: str = None) -> None:
     P = PAL_CLASSIC
     band_h = 30 * mm
     W = CONTENT_W - 4 * mm
@@ -969,14 +997,15 @@ def _build_batch_summary(output_path: str, batch_code: str, items: list, date_te
             c.rect(9.6 * mm, top - band_h - 1.1 * mm, PAGE_W - 19.2 * mm, 1.1 * mm, stroke=0, fill=1)
             rx, lx = PAGE_W - MARGIN - 2 * mm, MARGIN + 2 * mm
             _draw_rtl(c, rx, top - 13 * mm, "گزارش تجمیعی ارزش منطقه‌ای", _FONTS["bold"], 17, colors.white)
-            _draw_rtl(c, rx, top - 21 * mm, f"{_num(len(items))} ملک", _FONTS["regular"], 9.5,
+            _draw_issuer(c, rx, top - 27 * mm, issuer, max_width=rx - 83 * mm if verify_url else None)
+            _draw_rtl(c, rx, top - 20 * mm, f"{_num(len(items))} ملک", _FONTS["regular"], 9.5,
                       colors.HexColor("#C8D3E6"))
             _draw_ltr(c, lx, top - 11 * mm, f"تاریخ: {date_text}", _FONTS["regular"], 8.5, colors.white)
             _draw_ltr(c, lx, top - 17 * mm, f"ساعت: {time_text}", _FONTS["regular"], 8.5, colors.white)
             _draw_ltr(c, lx, top - 23 * mm, f"شماره: {batch_code}", _FONTS["regular"], 8.5,
                       colors.HexColor("#E3C77E"))
             if verify_url:
-                _draw_verify_qr(c, 76 * mm, top - band_h + 2.2 * mm, 21.5 * mm, verify_url,
+                _draw_verify_qr(c, 58 * mm, top - band_h + 2.2 * mm, 21.5 * mm, verify_url,
                                 caption="اسکن برای تأیید اصالت", color=P["accent"])
         _footer_line(c, doc, P, y=13 * mm, total_pages=_num(total_pages),
                      text="گزارش کامل هر ملک (مشخصات و نحوهٔ محاسبه) در صفحات بعدی همین فایل آمده است.")
@@ -1040,7 +1069,7 @@ def _build_batch_summary(output_path: str, batch_code: str, items: list, date_te
 
 
 def build_batch_pdf(output_path: str, batch_code: str, items: list, verify_url_for=None,
-                    date_text: str = None, time_text: str = None) -> bool:
+                    date_text: str = None, time_text: str = None, issuer: str = None) -> bool:
     """
     items: [{code, province, county, address, plak, land_value, bld_value, total, tax_result, calc}]
     verify_url_for: تابع code → لینک تأیید اصالت (برای QR صفحهٔ خلاصه و هر گزارش)
@@ -1062,11 +1091,12 @@ def build_batch_pdf(output_path: str, batch_code: str, items: list, verify_url_f
     parts = []
     try:
         summary = os.path.join(tmp, "summary.pdf")
-        _build_batch_summary(summary, batch_code, items, date_text, time_text, verify_url=vf(batch_code))
+        _build_batch_summary(summary, batch_code, items, date_text, time_text, verify_url=vf(batch_code),
+                             issuer=issuer)
         n_summary = len(PdfReader(summary).pages)
         if n_summary > 1:   # شمارهٔ «صفحهٔ x از n» درست شود
             _build_batch_summary(summary, batch_code, items, date_text, time_text,
-                                 verify_url=vf(batch_code), total_pages=n_summary)
+                                 verify_url=vf(batch_code), total_pages=n_summary, issuer=issuer)
         parts.append(summary)
         for i, it in enumerate(items):
             pth = os.path.join(tmp, f"item_{i}.pdf")
@@ -1074,7 +1104,7 @@ def build_batch_pdf(output_path: str, batch_code: str, items: list, verify_url_f
                                  address=it.get("address") or "", tax_result=it.get("tax_result") or {},
                                  result=it["calc"], plak=it.get("plak"), report_no=it["code"],
                                  verify_url=vf(it["code"]), date_text=it.get("date_text"),
-                                 time_text=it.get("time_text"))
+                                 time_text=it.get("time_text"), issuer=issuer)
             if not ok:
                 return False
             parts.append(pth)

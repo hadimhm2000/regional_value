@@ -481,7 +481,8 @@ async def dmg_calc_date(message: Message, state: FSMContext):
                + (f"🔸 شاخص ماه پرداخت هنوز منتشر نشده؛ شاخص {r['target_key']} استفاده شد.\n"
                   if r["used_latest_available"] else ""))
     await _send_pdf_result(
-        message, lambda path: damages_pdf.build_late_payment_pdf(path, r, due, pay),
+        message, lambda path: damages_pdf.build_late_payment_pdf(
+            path, r, due, pay, issuer=access_control.issuer_line(message.chat.id)),
         "خسارت_تاخیر_تادیه.pdf", caption,
         "📊 *نتیجهٔ محاسبهٔ خسارت تأخیر تأدیه*\n\n"
         f"💵 مبلغ دین: {_fmt(r['amount'])} ریال\n"
@@ -546,7 +547,8 @@ async def mahr_year(message: Message, state: FSMContext):
                f"💵 مبلغ مهریه: {_fmt(r['amount'])} ریال (سال عقد {r['marriage_year']})\n"
                f"💍 مهریه به نرخ روز: {_fmt(r['updated_amount'])} ریال\n")
     await _send_pdf_result(
-        message, lambda path: damages_pdf.build_mahrieh_pdf(path, r), "مهریه_به_نرخ_روز.pdf", caption,
+        message, lambda path: damages_pdf.build_mahrieh_pdf(path, r, issuer=access_control.issuer_line(message.chat.id)),
+        "مهریه_به_نرخ_روز.pdf", caption,
         "📊 *نتیجهٔ محاسبهٔ مهریه به نرخ روز*\n\n"
         f"💵 مبلغ مهریه: {_fmt(r['amount'])} ریال\n"
         f"📅 سال عقد: {r['marriage_year']} (شاخص سالانه: {r['base_index']:g})\n"

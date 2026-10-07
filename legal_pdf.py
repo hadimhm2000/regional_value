@@ -20,7 +20,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Spacer, Table, TableStyle
 
-from ayani_pdf import (CONTENT_W, MARGIN, PAGE_H, PAGE_W, PAL_CLASSIC, _FONTS, _draw_ltr, _draw_rtl,
+from ayani_pdf import (CONTENT_W, MARGIN, PAGE_H, PAGE_W, PAL_CLASSIC, _FONTS, _draw_issuer, _draw_ltr, _draw_rtl,
                        _ensure_fonts, _kv, _money, _p)
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ def _now_texts():
 
 
 def build_report(output_path: str, title: str, subtitle: str, prefix: str, sections: list,
-                 disclaimer: str) -> bool:
+                 disclaimer: str, issuer: str = None) -> bool:
     _ensure_fonts()
     P = PAL_CLASSIC
     band_h = 30 * mm
@@ -68,7 +68,8 @@ def build_report(output_path: str, title: str, subtitle: str, prefix: str, secti
             c.rect(9.6 * mm, top - band_h - 1.1 * mm, PAGE_W - 19.2 * mm, 1.1 * mm, stroke=0, fill=1)
             rx, lx = PAGE_W - MARGIN - 2 * mm, MARGIN + 2 * mm
             _draw_rtl(c, rx, top - 13 * mm, title, _FONTS["bold"], 17, colors.white)
-            _draw_rtl(c, rx, top - 21 * mm, subtitle, _FONTS["regular"], 9.5, colors.HexColor("#C8D3E6"))
+            _draw_rtl(c, rx, top - 20 * mm, subtitle, _FONTS["regular"], 9.5, colors.HexColor("#C8D3E6"))
+            _draw_issuer(c, rx, top - 27 * mm, issuer)
             _draw_ltr(c, lx, top - 11 * mm, f"تاریخ: {date_text}", _FONTS["regular"], 8.5, colors.white)
             _draw_ltr(c, lx, top - 17 * mm, f"ساعت: {time_text}", _FONTS["regular"], 8.5, colors.white)
             _draw_ltr(c, lx, top - 23 * mm, f"شماره: {report_no}", _FONTS["regular"], 8.5,
@@ -160,7 +161,7 @@ def build_report(output_path: str, title: str, subtitle: str, prefix: str, secti
 # ══════════════════════════════════════════════════════════════════
 # دیه
 # ══════════════════════════════════════════════════════════════════
-def build_diyeh_pdf(output_path: str, r: dict) -> bool:
+def build_diyeh_pdf(output_path: str, r: dict, issuer: str = None) -> bool:
     from ayani_pdf import num_to_words
     import diyeh_calc as dc
     sections = [("kv", "ورودی‌ها", [(k, v, len(v) > 40) for k, v in r["inputs"]]),
@@ -170,13 +171,14 @@ def build_diyeh_pdf(output_path: str, r: dict) -> bool:
                 ("bullets", "نحوهٔ محاسبه", r["steps"]),
                 ("bullets", "مستند قانونی (قانون مجازات اسلامی)", r["laws"])]
     return build_report(output_path, "گزارش محاسبهٔ دیه", "بر اساس قانون مجازات اسلامی (کتاب دیات)", "DY",
-                        sections, "این گزارش صرفاً جهت اطلاع است؛ ملاک نهایی رأی دادگاه و نظر پزشکی قانونی است.")
+                        sections, "این گزارش صرفاً جهت اطلاع است؛ ملاک نهایی رأی دادگاه و نظر پزشکی قانونی است.",
+                        issuer=issuer)
 
 
 # ══════════════════════════════════════════════════════════════════
 # سهم‌الارث
 # ══════════════════════════════════════════════════════════════════
-def build_inheritance_pdf(output_path: str, r: dict) -> bool:
+def build_inheritance_pdf(output_path: str, r: dict, issuer: str = None) -> bool:
     import inheritance_calc as ic
     rows, estate = r["rows"], r["estate"]
     lcd = ic.common_denominator(rows)
@@ -199,4 +201,5 @@ def build_inheritance_pdf(output_path: str, r: dict) -> bool:
                                 "قانون مدنی است؛ «سهم هر نفر» کسری از کل ترکه است."]
     sections += [("bullets", "توضیحات", notes), ("bullets", "مستند قانونی (قانون مدنی)", r["laws"])]
     return build_report(output_path, "گزارش تقسیم ترکه (سهم‌الارث)", "بر اساس قانون مدنی", "IN", sections,
-                        "این گزارش صرفاً جهت اطلاع است؛ ملاک نهایی گواهی انحصار وراثت و رأی دادگاه است.")
+                        "این گزارش صرفاً جهت اطلاع است؛ ملاک نهایی گواهی انحصار وراثت و رأی دادگاه است.",
+                        issuer=issuer)
