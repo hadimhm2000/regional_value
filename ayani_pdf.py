@@ -217,7 +217,8 @@ def num_to_words(n: int) -> str:
 # ══════════════════════════════════════════════════════════════════
 # جمع‌آوری محتوا (مشترک بین همهٔ طرح‌ها)
 # ══════════════════════════════════════════════════════════════════
-def _collect(province, county, address, tax_result, result, date_text, time_text, plak=None) -> dict:
+def _collect(province, county, address, tax_result, result, date_text, time_text, plak=None,
+             report_no=None, verify_url=None) -> dict:
     import ownership_share as osh
     land, b = result["land"], result.get("building")
     land_share = osh.frac_from_str(result.get("land_share") or "1")
@@ -320,7 +321,8 @@ def _collect(province, county, address, tax_result, result, date_text, time_text
         "location": location, "tax_values": tax_values,
         "province": province, "county": county, "year": year,
         "date": date_text, "time": time_text,
-        "report_no": _report_no(),
+        "report_no": report_no or _report_no(),
+        "verify_url": verify_url,
         "prop": prop, "land": land_pairs, "bld": bld,
         "land_value": result.get("land_value", land["value"]),
         "bld_value": result.get("building_value", b["value"] if b else 0),
@@ -497,6 +499,29 @@ def _draw_ltr(c, x_left, y, text, font, size, color):
     c.drawString(x_left, y, _bidi(text))
 
 
+def _draw_verify_qr(c, x, y, size, url, caption=None, color=colors.black):
+    """کاشی سفید QR تأیید اصالت؛ (x, y) گوشهٔ پایین-چپ کاشی."""
+    from reportlab.graphics import renderPDF
+    from reportlab.graphics.barcode.qr import QrCodeWidget
+    from reportlab.graphics.shapes import Drawing
+
+    cap_h = 4.2 * mm if caption else 0
+    pad = 1.4 * mm
+    c.setFillColor(colors.white)
+    c.roundRect(x, y, size, size + cap_h, 1.6 * mm, stroke=0, fill=1)
+    w = QrCodeWidget(url, barLevel="M")
+    w.barFillColor = color
+    x1, y1, x2, y2 = w.getBounds()
+    inner = size - 2 * pad
+    d = Drawing(inner, inner, transform=[inner / (x2 - x1), 0, 0, inner / (y2 - y1), 0, 0])
+    d.add(w)
+    renderPDF.draw(d, c, x + pad, y + cap_h + pad)
+    if caption:
+        c.setFont(_FONTS["regular"], 6.3)
+        c.setFillColor(color)
+        c.drawCentredString(x + size / 2, y + 1.5 * mm, _bidi(caption))
+
+
 def _footer_line(c, doc, P, left=MARGIN, right=PAGE_W - MARGIN, y=10 * mm, total_pages=2, text=None):
     c.setStrokeColor(P["line"])
     c.setLineWidth(0.5)
@@ -544,6 +569,9 @@ def _render_classic(ctx):
             _draw_ltr(c, lx, top - 17 * mm, f"ساعت: {ctx['time']}", _FONTS["regular"], 8.5, colors.white)
             _draw_ltr(c, lx, top - 23 * mm, f"شماره: {ctx['report_no']}", _FONTS["regular"], 8.5,
                       colors.HexColor("#E3C77E"))
+            if ctx.get("verify_url"):
+                _draw_verify_qr(c, 76 * mm, top - bh + 2.2 * mm, 21.5 * mm, ctx["verify_url"],
+                                caption="اسکن برای تأیید اصالت", color=P["accent"])
         else:
             _draw_rtl(c, rx, top - 12.5 * mm, "نحوهٔ محاسبه و اطلاعات مکان", _FONTS["bold"], 15, colors.white)
             _draw_ltr(c, lx, top - 9 * mm, f"{ctx['province']} — {ctx['county']}", _FONTS["regular"], 8.5,
@@ -878,10 +906,13 @@ DESIGNS = {"classic": _render_classic, "cards": _render_cards, "minimal": _rende
 
 def build_ayani_pdf(output_path: str, *, province: str, county: str, address: str,
                     tax_result: dict, result: dict, date_text: str = None, time_text: str = None,
-                    design: str = None, plak: str = None) -> bool:
+                    design: str = None, plak: str = None, report_no: str = None,
+                    verify_url: str = None) -> bool:
     """
     result: خروجی ayani_calc.compute_all
     tax_result: خروجی سامانهٔ مالیاتی (برای شماره بلوک/ردیف و اداره)
+    report_no: کد رهگیری استعلام (ثبت‌شده در پایگاه داده) — در غیر این صورت شمارهٔ زمانی
+    verify_url: لینک تأیید اصالت؛ در طرح classic به‌صورت QR در سرتیتر صفحهٔ اول چاپ می‌شود
     design: یکی از DESIGNS (پیش‌فرض DEFAULT_DESIGN)
     """
     _ensure_fonts()
@@ -893,7 +924,8 @@ def build_ayani_pdf(output_path: str, *, province: str, county: str, address: st
         date_text = date_text or ""
         time_text = time_text or ""
 
-    ctx = _collect(province, county, address, tax_result, result, date_text, time_text, plak=plak)
+    ctx = _collect(province, county, address, tax_result, result, date_text, time_text, plak=plak,
+                   report_no=report_no, verify_url=verify_url)
     design = design if design in DESIGNS else DEFAULT_DESIGN
     try:
         if design == "sidebar":
@@ -911,3 +943,159 @@ def build_ayani_pdf(output_path: str, *, province: str, county: str, address: st
     except Exception as e:
         logger.error(f"[AYANI-PDF] خطا در ساخت PDF: {e}", exc_info=True)
         return False
+
+
+# ══════════════════════════════════════════════════════════════════
+# گزارش تجمیعی چند ملک: صفحهٔ خلاصه + گزارش کامل هر ملک (پشت سر هم)
+# ══════════════════════════════════════════════════════════════════
+def _build_batch_summary(output_path: str, batch_code: str, items: list, date_text: str, time_text: str,
+                         verify_url: str = None, total_pages: int = 1) -> None:
+    P = PAL_CLASSIC
+    band_h = 30 * mm
+    W = CONTENT_W - 4 * mm
+    total = sum(int(it["total"] or 0) for it in items)
+
+    def page(c, doc):
+        c.saveState()
+        c.setStrokeColor(P["accent"]); c.setLineWidth(1.3)
+        c.rect(8 * mm, 8 * mm, PAGE_W - 16 * mm, PAGE_H - 16 * mm)
+        c.setStrokeColor(P["gold"]); c.setLineWidth(0.5)
+        c.rect(9.6 * mm, 9.6 * mm, PAGE_W - 19.2 * mm, PAGE_H - 19.2 * mm)
+        top = PAGE_H - 9.6 * mm
+        if doc.page == 1:
+            c.setFillColor(P["accent"])
+            c.rect(9.6 * mm, top - band_h, PAGE_W - 19.2 * mm, band_h, stroke=0, fill=1)
+            c.setFillColor(P["gold"])
+            c.rect(9.6 * mm, top - band_h - 1.1 * mm, PAGE_W - 19.2 * mm, 1.1 * mm, stroke=0, fill=1)
+            rx, lx = PAGE_W - MARGIN - 2 * mm, MARGIN + 2 * mm
+            _draw_rtl(c, rx, top - 13 * mm, "گزارش تجمیعی ارزش منطقه‌ای", _FONTS["bold"], 17, colors.white)
+            _draw_rtl(c, rx, top - 21 * mm, f"{_num(len(items))} ملک", _FONTS["regular"], 9.5,
+                      colors.HexColor("#C8D3E6"))
+            _draw_ltr(c, lx, top - 11 * mm, f"تاریخ: {date_text}", _FONTS["regular"], 8.5, colors.white)
+            _draw_ltr(c, lx, top - 17 * mm, f"ساعت: {time_text}", _FONTS["regular"], 8.5, colors.white)
+            _draw_ltr(c, lx, top - 23 * mm, f"شماره: {batch_code}", _FONTS["regular"], 8.5,
+                      colors.HexColor("#E3C77E"))
+            if verify_url:
+                _draw_verify_qr(c, 76 * mm, top - band_h + 2.2 * mm, 21.5 * mm, verify_url,
+                                caption="اسکن برای تأیید اصالت", color=P["accent"])
+        _footer_line(c, doc, P, y=13 * mm, total_pages=_num(total_pages),
+                     text="گزارش کامل هر ملک (مشخصات و نحوهٔ محاسبه) در صفحات بعدی همین فایل آمده است.")
+        c.restoreState()
+
+    # جدول: ستون اول سمت چپ است؛ ترتیب منطقی راست‌به‌چپ با reversed ساخته می‌شود
+    head = ["ردیف", "کد رهگیری", "موقعیت", "آدرس / پلاک", "ارزش عرصه", "ارزش اعیانی", "ارزش کل"]
+    ratios = [0.06, 0.15, 0.13, 0.24, 0.14, 0.14, 0.14]
+    widths = [W * r for r in ratios]
+    rows = [list(reversed([_p(h, 7.8, colors.white, "bold", "center") for h in head]))]
+    for i, it in enumerate(items, 1):
+        where = f"{it.get('province') or '—'} — {it.get('county') or '—'}"
+        addr = it.get("address") or "—"
+        if it.get("plak"):
+            addr = f"{addr} / {it['plak']}"
+        if len(addr) > 110:
+            addr = addr[:107] + "…"
+        cells = [
+            _p(_num(i), 8, P["muted"], align="center"),
+            _p(it["code"], 7.4, P["ink"], align="center"),
+            _p(where, 7.6, P["ink"]),
+            _p(addr, 7.2, P["ink"], leading=10.5),
+            _p(_money(it.get("land_value") or 0), 7.8, P["ink"], align="left"),
+            _p(_money(it.get("bld_value") or 0) if it.get("bld_value") else "—", 7.8, P["ink"], align="left"),
+            _p(_money(it.get("total") or 0), 8.2, P["ink"], "bold", "left"),
+        ]
+        rows.append(list(reversed(cells)))
+    t = Table(rows, colWidths=list(reversed(widths)), repeatRows=1)
+    cmds = [
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BACKGROUND", (0, 0), (-1, 0), P["accent"]),
+        ("BOX", (0, 0), (-1, -1), 0.6, P["line"]),
+        ("INNERGRID", (0, 1), (-1, -1), 0.35, P["line"]),
+        ("TOPPADDING", (0, 0), (-1, -1), 1.6 * mm), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.6 * mm),
+        ("LEFTPADDING", (0, 0), (-1, -1), 1.4 * mm), ("RIGHTPADDING", (0, 0), (-1, -1), 1.4 * mm),
+    ]
+    for r in range(2, len(rows), 2):
+        cmds.append(("BACKGROUND", (0, r), (-1, r), P["soft"]))
+    t.setStyle(TableStyle(cmds))
+
+    tot = Table([[_p(f"{_money(total)} ریال", 15, colors.white, "bold", "left"),
+                  _p("جمع ارزش منطقه‌ای همهٔ املاک", 12, colors.white, "bold")]],
+                colWidths=[W * 0.45, W * 0.55])
+    tot.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("BACKGROUND", (0, 0), (-1, -1), P["accent"]),
+        ("LINEABOVE", (0, 0), (-1, 0), 1.2, P["gold"]),
+        ("TOPPADDING", (0, 0), (-1, -1), 2.6 * mm), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.6 * mm),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm), ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
+    ]))
+    story = [Spacer(1, band_h - 2 * mm),
+             _p("■  فهرست املاک", 10.5, P["accent"], "bold"), Spacer(1, 2 * mm),
+             t, Spacer(1, 5 * mm), tot, Spacer(1, 2 * mm),
+             _p(f"به حروف: {num_to_words(total)} ریال", 8.6, P["muted"]),
+             Spacer(1, 4 * mm),
+             _p("مبالغ به ریال است. ارزش هر ملک با اعمال سهم مالکانهٔ همان ملک محاسبه شده و صحت هر ردیف با کد "
+                "رهگیری آن در ربات قابل بررسی است.", 7.8, P["muted"])]
+    doc = SimpleDocTemplate(output_path, pagesize=A4, title="گزارش تجمیعی ارزش منطقه‌ای", author="",
+                            leftMargin=MARGIN + 2 * mm, rightMargin=MARGIN + 2 * mm,
+                            topMargin=12 * mm, bottomMargin=22 * mm)
+    doc.build(story, onFirstPage=page, onLaterPages=page)
+
+
+def build_batch_pdf(output_path: str, batch_code: str, items: list, verify_url_for=None,
+                    date_text: str = None, time_text: str = None) -> bool:
+    """
+    items: [{code, province, county, address, plak, land_value, bld_value, total, tax_result, calc}]
+    verify_url_for: تابع code → لینک تأیید اصالت (برای QR صفحهٔ خلاصه و هر گزارش)
+    خروجی: یک فایل = صفحهٔ خلاصه + گزارش دوصفحه‌ای هر ملک.
+    """
+    import tempfile
+    from pypdf import PdfReader, PdfWriter
+
+    _ensure_fonts()
+    try:
+        from regional_value_pdf import _get_persian_date, _get_persian_time
+        date_text = date_text or _get_persian_date()
+        time_text = time_text or _get_persian_time()
+    except Exception:
+        date_text, time_text = date_text or "", time_text or ""
+    vf = verify_url_for or (lambda code: None)
+
+    tmp = tempfile.mkdtemp(prefix="rv_batch_")
+    parts = []
+    try:
+        summary = os.path.join(tmp, "summary.pdf")
+        _build_batch_summary(summary, batch_code, items, date_text, time_text, verify_url=vf(batch_code))
+        n_summary = len(PdfReader(summary).pages)
+        if n_summary > 1:   # شمارهٔ «صفحهٔ x از n» درست شود
+            _build_batch_summary(summary, batch_code, items, date_text, time_text,
+                                 verify_url=vf(batch_code), total_pages=n_summary)
+        parts.append(summary)
+        for i, it in enumerate(items):
+            pth = os.path.join(tmp, f"item_{i}.pdf")
+            ok = build_ayani_pdf(pth, province=it.get("province") or "", county=it.get("county") or "",
+                                 address=it.get("address") or "", tax_result=it.get("tax_result") or {},
+                                 result=it["calc"], plak=it.get("plak"), report_no=it["code"],
+                                 verify_url=vf(it["code"]), date_text=it.get("date_text"),
+                                 time_text=it.get("time_text"))
+            if not ok:
+                return False
+            parts.append(pth)
+        w = PdfWriter()
+        for pth in parts:
+            for pg in PdfReader(pth).pages:
+                w.add_page(pg)
+        w.add_metadata({"/Title": "گزارش تجمیعی ارزش منطقه‌ای"})
+        with open(output_path, "wb") as f:
+            w.write(f)
+        return True
+    except Exception as e:
+        logger.error(f"[AYANI-PDF] خطا در ساخت گزارش تجمیعی: {e}", exc_info=True)
+        return False
+    finally:
+        for pth in parts:
+            try:
+                os.remove(pth)
+            except OSError:
+                pass
+        try:
+            os.rmdir(tmp)
+        except OSError:
+            pass

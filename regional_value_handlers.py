@@ -30,7 +30,9 @@
          تایید ادمین = ۲ استعلام رایگان → پس از اتمام، انتخاب اشتراک
          ماهانه/سالانه → فاکتور بله → فعال‌شدن اشتراک
   ۱۱. استعلام عرصه از سامانهٔ مالیاتی + تعیین شهرستان از روی نقشه + محاسبهٔ
-     اعیانی (ayani_calc) × سهم مالکانه → PDF دو صفحه‌ای (ayani_pdf) → ارسال
+     اعیانی (ayani_calc) × سهم مالکانه → ثبت در سوابق با کد رهگیری (history) →
+     PDF دو صفحه‌ای با کد و QR تأیید اصالت (ayani_pdf) → ارسال
+  ۱۲. پس از نتیجه: «افزودن ملک دیگر» (گزارش تجمیعی) — دکمه‌ها در menu_handlers
 
 ویژگی‌های پایداری این نسخهٔ مستقل (حفظ‌شده):
   • هر استعلام حداکثر دو بار تلاش می‌شود (تلاش اول + یک تلاش مجدد خودکار).
@@ -61,12 +63,14 @@ from aiogram.types import (
 
 import ayani_calc
 import ownership_share as osh
-from config import ADMIN_ID, MAX_CONCURRENT_QUERIES, SUBSCRIPTION_PLANS, TRIAL_CREDITS
+from config import ADMIN_ID, BOT_USERNAME, MAX_CONCURRENT_QUERIES, SUBSCRIPTION_PLANS, TRIAL_CREDITS
 from tax_geolocation_query import get_province_list, find_land_use_value, extract_all_land_use_values
 import access_control
+import db
+import history
 from payment import send_subscription_invoice, parse_payload, INVOICE_PAYLOAD_TYPE
 from bale_file_sender import send_document_direct
-from keyboards import is_back, is_restart, main_menu_kb, nav_only_kb, nav_row
+from keyboards import after_result_kb, is_back, is_restart, main_menu_kb, nav_only_kb, nav_row
 
 logger = logging.getLogger(__name__)
 
@@ -365,12 +369,29 @@ async def _go_back(message: Message, state: FSMContext, current: str):
 # ══════════════════════════════════════════════════════════════════
 # نقطه ورود
 # ══════════════════════════════════════════════════════════════════
-async def regional_value_entry(message: Message, state: FSMContext):
-    """شروع فرآیند استعلام (همهٔ داده‌های قبلی پاک می‌شود)."""
+async def regional_value_entry(message: Message, state: FSMContext, batch_code: str = None):
+    """
+    شروع فرآیند استعلام (همهٔ داده‌های قبلی پاک می‌شود).
+    batch_code: اگر داده شود، نتیجهٔ این استعلام به همان گزارش تجمیعی اضافه می‌شود.
+    """
     await state.clear()
-    await state.update_data(**{k: None for k in _ALL_KEYS}, rv_edit_snapshot=None)
+    await state.update_data(**{k: None for k in _ALL_KEYS}, rv_edit_snapshot=None, rv_batch=batch_code)
     if await _entry_access_gate(message, state):
         return
+    db.log_event("form_start", message.from_user.id)
+    await _advance(message, state)
+
+
+async def start_form_with_inputs(message: Message, state: FSMContext, inputs: dict, user_id: int):
+    """
+    «محاسبهٔ مجدد با تغییر» از سوابق: دادهٔ فرم یک استعلام قبلی بارگذاری می‌شود و
+    کاربر مستقیم به پیش‌نمایش (یا اولین مرحلهٔ ناقص) می‌رود تا هر مورد را ویرایش کند.
+    """
+    await state.clear()
+    base = {k: None for k in _ALL_KEYS}
+    base.update({k: v for k, v in (inputs or {}).items() if k in base})
+    await state.update_data(**base, rv_edit_snapshot=None, rv_batch=None)
+    db.log_event("form_reuse", user_id)
     await _advance(message, state)
 
 
@@ -1584,6 +1605,7 @@ async def process_preview(message: Message, state: FSMContext, bot: Bot):
         await _advance(message, state)
         return
     if message.text == _CONFIRM:
+        db.log_event("preview_confirm", message.from_user.id)
         await _start_access_flow(message, state, bot)
         return
     if message.text == _EDIT:
@@ -1728,7 +1750,7 @@ async def _start_access_flow(message: Message, state: FSMContext, bot: Bot):
         if ok:
             left = await access_control.free_retry_count(user_id)
             if left > 0:
-                await message.answer(f"🎁 استعلام رایگان باقی‌مانده: {_to_fa(left)}", reply_markup=main_menu_kb())
+                await message.answer(f"🎁 استعلام رایگان باقی‌مانده: {_to_fa(left)}")
             else:
                 await _ask_plan(message, state, "🔔 استعلام‌های رایگان شما به پایان رسید.\n\n")
         return
@@ -1871,7 +1893,8 @@ async def process_continue(message: Message, state: FSMContext, bot: Bot):
     if _form_complete(await state.get_data()):
         await _start_access_flow(message, state, bot)
     else:
-        await regional_value_entry(message, state)
+        # اگر کاربر وسط «افزودن ملک دیگر» به مرحلهٔ تست/خرید رفته بود، گزارش تجمیعی حفظ شود
+        await regional_value_entry(message, state, (await state.get_data()).get("rv_batch"))
 
 
 # ── انتخاب اشتراک ──
@@ -1959,7 +1982,20 @@ async def rv_successful_payment(message: Message, state: FSMContext, bot: Bot):
         await message.answer("✅ پرداخت شما دریافت شد؛ فعال‌سازی اشتراک با خطا مواجه شد و به ادمین اطلاع داده شد.")
         return
 
-    await _notify_admin(bot, f"💳 خرید {plan['title']} — کاربر {getattr(message.from_user, 'full_name', '')} ({user_id})")
+    try:
+        access_control.record_payment(user_id, plan_key, getattr(sp, "total_amount", plan["rial"]),
+                                      getattr(sp, "provider_payment_charge_id", "") or "")
+        db.log_event("payment", user_id, plan_key)
+    except Exception as e:
+        logger.error(f"[RV] ثبت پرداخت کاربر {user_id} در پایگاه داده ناموفق: {e}", exc_info=True)
+    office = access_control.get_office_info(user_id)
+    await _notify_admin(
+        bot,
+        f"💳 خرید {plan['title']} — کاربر {getattr(message.from_user, 'full_name', '')} ({user_id})\n"
+        f"🏢 دفتر: {office.get('office_name') or 'ثبت نشده'} — کد: {office.get('office_code') or 'ثبت نشده'}\n"
+        "این خرید در اکسل اشتراک‌ها (/subs_excel) ثبت شد"
+        + ("" if office.get("office_name") else f"؛ ثبت نام دفتر: /office {user_id} کد_دفتر نام_دفتر"),
+    )
     expiry = _jalali_date(sub["expires_at"])
     head = f"✅ پرداخت تایید شد و {plan['title']} شما تا {expiry} فعال است."
     if _form_complete(await state.get_data()):
@@ -2005,6 +2041,7 @@ _REFUND_NOTE = "\n💚 اعتبار استعلام رایگان شما بازگ�
 
 async def _system_failure(bot, user_id, refund_credit, admin_text, user_text):
     """خطای سیستمی: اطلاع به ادمین + بازگرداندن اعتبار مصرف‌شده + پیام به کاربر."""
+    db.log_event("query_fail", user_id, admin_text)
     await _notify_admin(bot, admin_text)
     if refund_credit:
         try:
@@ -2107,6 +2144,7 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
         tax_result = result.get("tax_info", {}) if result else {}
 
         if not tax_result.get("فیلدهای_ساختاریافته"):
+            db.log_event("no_result", user_id, f"{province} | {address}")
             await _safe_send(
                 bot, user_id,
                 "⚠️ متاسفانه نتیجه‌ای از سامانه مالیاتی دریافت نشد.\n"
@@ -2117,6 +2155,7 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
 
         all_lu_values = extract_all_land_use_values(tax_result)
         if not any(v is not None for v in all_lu_values.values()):
+            db.log_event("no_value", user_id, f"{province} | {address}")
             await _safe_send(
                 bot, user_id,
                 "🛑 منطقهٔ مورد نظر شما در سایت اداره امور مالیاتی، ارزش منطقه‌ای ثبت نشده است.",
@@ -2129,6 +2168,7 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
             area, land_use, all_lu_values, other_index=data.get("rv_land_other_idx"),
         )
         if not land["ok"]:
+            db.log_event("land_use_missing", user_id, f"{province} | {land_use}")
             available = [
                 f"{lu}: {v:,} ریال" for lu in LAND_USES
                 if (v := find_land_use_value(tax_result, lu)) is not None
@@ -2210,12 +2250,27 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
         if county_info["method"] != "name" and county_info.get("hint"):
             county_label = county_info["hint"].replace("شهرستان ", "").strip()
 
+        # ── ثبت در سوابق با کد رهگیری (خطای پایگاه داده نباید مانع تحویل نتیجه شود) ──
+        code = None
+        batch_code = data.get("rv_batch")
+        try:
+            code = history.save_query(
+                user_id, data, province=province, county=county_label, address=address, calc=calc,
+                tax_result=tax_result, plak=data.get("rv_plak_text") or None, has_building=has_building,
+                batch_code=batch_code,
+            )
+            db.log_event("query_ok", user_id, code)
+        except Exception as e:
+            logger.error(f"[RV] ثبت استعلام کاربر {user_id} در سوابق ناموفق: {e}", exc_info=True)
+            batch_code = None
+
         # خطای لحظه‌ای ارسال این پیام نباید مانع ساخت/ارسال PDF شود (کپشن PDF هم مقادیر را دارد)
         await _safe_send(
             bot, user_id,
             f"📊 *نتیجهٔ محاسبهٔ ارزش منطقه‌ای*\n\n"
             f"📍 {province} — {county_label}\n\n"
-            f"{_result_values_text(calc, bold=True)}",
+            f"{_result_values_text(calc, bold=True)}"
+            + (f"\n\n🔖 کد رهگیری: {code}" if code else ""),
         )
 
         # ── ساخت و ارسال PDF؛ در صورت شکست، با همان اطلاعات هر یک دقیقه دوباره ──
@@ -2230,9 +2285,11 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
             "has_building": has_building,
             "inputs_summary": _inputs_summary(data),
             "refund_credit": refund_credit,
+            "code": code,
+            "batch_code": batch_code,
         }
         if await _build_and_send_pdf(bot, job):
-            await _safe_send(bot, user_id, "بازگشت به منوی اصلی.", reply_markup=get_main_menu_kb(user_id))
+            await _send_after_result(bot, user_id, code, batch_code)
             return True
 
         _schedule_pdf_retry(bot, job)
@@ -2293,7 +2350,7 @@ async def _build_and_send_pdf(bot: Bot, job: dict) -> bool:
                         None,
                         lambda: _build_pdf_sync(
                             pdf_path, job["province"], job["county"], job["address"],
-                            job["tax_result"], job["calc"], plak=job["plak"],
+                            job["tax_result"], job["calc"], plak=job["plak"], code=job.get("code"),
                         ),
                     ),
                     timeout=_STEP_TIMEOUT_SECONDS,
@@ -2313,10 +2370,12 @@ async def _build_and_send_pdf(bot: Bot, job: dict) -> bool:
         sent = await send_document_direct(
             chat_id=user_id,
             file_path=pdf_path,
-            filename=f"ارزش_منطقه_ای_{job['province']}.pdf",
+            filename=f"ارزش_منطقه_ای_{job['province']}"
+                     + (f"_{job['code']}" if job.get("code") else "") + ".pdf",
             caption=(
                 f"📄 گزارش ارزش منطقه‌ای ملک ({'عرصه و اعیانی' if job['has_building'] else 'عرصه'})\n\n"
                 f"{_result_values_text(job['calc'], bold=False)}"
+                + (f"\n\n🔖 کد رهگیری: {job['code']}" if job.get("code") else "")
             ),
         )
         if not sent:
@@ -2346,6 +2405,8 @@ async def _pdf_retry_worker(bot: Bot, job: dict) -> None:
             try:
                 if await _build_and_send_pdf(bot, job):
                     logger.info(f"[RV] PDF کاربر {user_id} در تلاش پس‌زمینهٔ {attempt} ارسال شد")
+                    if job.get("code"):
+                        await _send_after_result(bot, user_id, job["code"], job.get("batch_code"), quiet=True)
                     return
             except Exception as e:
                 job["last_error"] = f"{type(e).__name__}: {e}"
@@ -2430,9 +2491,41 @@ def _do_query_sync(province: str, address: str, lat, lng):
     return full_pipeline(address=address, province_hint=province)
 
 
-def _build_pdf_sync(pdf_path, province, county, address, tax_result, calc, plak=None):
+def verify_url(code: str) -> str:
+    """لینک تأیید اصالت (محتوای QR روی PDF): باز کردن ربات با پارامتر start."""
+    return f"https://ble.ir/{BOT_USERNAME}?start=v_{code.replace('-', '')}"
+
+
+def _build_pdf_sync(pdf_path, province, county, address, tax_result, calc, plak=None, code=None):
     from ayani_pdf import build_ayani_pdf
     return build_ayani_pdf(
         pdf_path, province=province, county=county, address=address,
         tax_result=tax_result, result=calc, plak=plak,
+        report_no=code, verify_url=verify_url(code) if code else None,
     )
+
+
+async def _send_after_result(bot: Bot, user_id: int, code, batch_code, quiet: bool = False):
+    """
+    پیام پایانی پس از تحویل PDF: دکمهٔ «افزودن ملک دیگر» (گزارش تجمیعی) و در صورت
+    وجود گزارش تجمیعی با ۲ ملک یا بیشتر، دکمهٔ دریافت آن.
+    """
+    if not code:
+        await _safe_send(bot, user_id, "بازگشت به منوی اصلی.", reply_markup=get_main_menu_kb(user_id))
+        return
+    n = 0
+    if batch_code:
+        try:
+            n = history.batch_count(batch_code)
+        except Exception:
+            n = 0
+    if n >= 2:
+        text = (f"📑 این ملک به گزارش تجمیعی اضافه شد ({_to_fa(n)} ملک).\n"
+                "برای افزودن ملک بعدی یا دریافت گزارش تجمیعی، دکمهٔ مربوط را بزنید.")
+    elif quiet:
+        text = "بازگشت به منوی اصلی."
+    else:
+        text = ("بازگشت به منوی اصلی.\n"
+                "💡 اگر پرونده چند ملک دارد، «افزودن ملک دیگر» را بزنید تا در پایان یک گزارش "
+                "تجمیعی با جمع ارزش همهٔ املاک دریافت کنید.")
+    await _safe_send(bot, user_id, text, reply_markup=after_result_kb(n))

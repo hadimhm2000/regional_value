@@ -8,6 +8,11 @@ admin_commands.py — دستورهای مدیریتی، فقط برای ADMIN_ID
 /subs                   — نمایش مشترکان فعال
 /addsub <آیدی> <monthly|yearly> — فعال‌سازی/تمدید دستی اشتراک
 /credit <آیدی> <تعداد>  — افزودن استعلام رایگان
+/stats                  — آمار استفاده، قیف تبدیل، فروش و خطاها
+/rates                  — دریافت اکسل نرخ اعیانی فعلی؛ ارسال اکسل ویرایش‌شده = به‌روزرسانی (با تایید)
+/rates_rollback         — بازگرداندن نسخهٔ قبلی نرخ‌ها
+/subs_excel             — اکسل همهٔ مشترکان (با نام و کد دفتر)؛ ارسال اکسل ویرایش‌شده = افزودن/تغییر اشتراک‌ها (با تایید)
+/office <آیدی> <کد دفتر> <نام دفتر> — ثبت نام و کد دفتر خدمات قضایی برای یک آیدی
 دکمه‌های «✅ تایید / ❌ رد» زیر پیام درخواست تست — تایید = ۲ استعلام رایگان
 """
 import logging
@@ -17,7 +22,7 @@ from aiogram.filters import Command
 import time
 
 from aiogram import F
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import ADMIN_ID, SUBSCRIPTION_PLANS, TRIAL_CREDITS
 import access_control
@@ -41,6 +46,7 @@ async def cmd_approve(message: Message):
         return
     user_id = int(parts[1])
     added = await access_control.approve_user(user_id)
+    access_control.refresh_subs_excel()
     if added:
         await message.answer(f"✅ کاربر {user_id} تایید شد و از این پس رایگان استفاده می‌کند.")
         try:
@@ -63,6 +69,7 @@ async def cmd_revoke(message: Message):
         return
     user_id = int(parts[1])
     removed = await access_control.revoke_user(user_id)
+    access_control.refresh_subs_excel()
     if removed:
         await message.answer(f"🗑 تایید کاربر {user_id} لغو شد.")
     else:
@@ -150,12 +157,14 @@ async def cmd_subs(message: Message):
     if not active:
         await message.answer("هیچ اشتراک فعالی وجود ندارد.")
         return
-    lines = [
-        f"• {uid} — {SUBSCRIPTION_PLANS.get(s.get('plan'), {}).get('title', s.get('plan'))} — "
-        f"{-int(-(s['expires_at'] - now) // 86400)} روز باقی‌مانده"
-        for uid, s in sorted(active, key=lambda x: x[1]["expires_at"])
-    ]
-    await message.answer(f"💳 مشترکان فعال ({len(active)}):\n" + "\n".join(lines))
+    lines = []
+    for uid, s in sorted(active, key=lambda x: x[1]["expires_at"]):
+        office = access_control.get_office_info(int(uid))
+        label = " — ".join(x for x in (office.get("office_name"), office.get("office_code")) if x)
+        lines.append(f"• {uid}{' (' + label + ')' if label else ''} — {access_control.plan_title(s.get('plan'))} — "
+                     f"{-int(-(s['expires_at'] - now) // 86400)} روز باقی‌مانده")
+    await message.answer(f"💳 مشترکان فعال ({len(active)}):\n" + "\n".join(lines)
+                         + "\n\nفهرست کامل و قابل ویرایش: /subs_excel")
 
 
 @admin_router.message(Command("addsub"))
@@ -188,3 +197,369 @@ async def cmd_credit(message: Message):
     user_id, n = int(parts[1]), int(parts[2])
     await access_control.grant_free_retry(user_id, n)
     await message.answer(f"✅ {n} استعلام رایگان برای کاربر {user_id} ثبت شد.")
+
+
+# ══════════════════════════════════════════════════════════════════
+# /stats — آمار استفاده، قیف تبدیل و درآمد
+# ══════════════════════════════════════════════════════════════════
+def _fa(n) -> str:
+    return str(n).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+
+
+def _tehran_midnight_ts() -> float:
+    import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.datetime.now(ZoneInfo("Asia/Tehran"))
+    except Exception:
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=3, minutes=30)))
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def build_stats_text(now: float = None) -> str:
+    import db
+    now = now or time.time()
+    periods = [("امروز", _tehran_midnight_ts()), ("۷ روز", now - 7 * 86400), ("۳۰ روز", now - 30 * 86400)]
+
+    def ev(kind):
+        return [db.query_one("SELECT COUNT(*) n FROM events WHERE kind=? AND created_at>=?", (kind, t))["n"]
+                for _, t in periods]
+
+    def ev_users(kind):
+        return [db.query_one("SELECT COUNT(DISTINCT user_id) n FROM events WHERE kind=? AND created_at>=?",
+                             (kind, t))["n"] for _, t in periods]
+
+    def row(title, vals):
+        return f"{title}: " + " | ".join(_fa(f"{v:,}") for v in vals)
+
+    starts, confirms, ok = ev("form_start"), ev("preview_confirm"), ev("query_ok")
+    no_res = [a + b + c for a, b, c in zip(ev("no_result"), ev("no_value"), ev("land_use_missing"))]
+    pays = [db.query_one("SELECT COUNT(*) n, COALESCE(SUM(amount_rial),0) s FROM payments WHERE created_at>=?",
+                         (t,)) for _, t in periods]
+    trials = [db.query_one("SELECT COUNT(*) n FROM trial_requests WHERE created_at>=?", (t,))["n"]
+              for _, t in periods]
+
+    lines = ["📊 *آمار ربات*", "ستون‌ها: " + " | ".join(p for p, _ in periods), "",
+             "— استفاده —",
+             row("🟢 کاربران فعال (استعلام موفق)", ev_users("query_ok")),
+             row("📝 شروع فرم", starts),
+             row("👁 تایید پیش‌نمایش", confirms),
+             row("✅ استعلام موفق", ok),
+             row("⚠️ بدون نتیجه (آدرس/منطقه)", no_res),
+             row("🛑 خطای سیستمی", ev("query_fail")),
+             row("📄 دریافت دوبارهٔ PDF", ev("pdf_resend")),
+             row("📑 گزارش تجمیعی", ev("batch_pdf")),
+             row("🔎 بررسی اصالت", ev("verify")),
+             "", "— قیف (۳۰ روز) —"]
+    s30, c30, o30 = starts[2], confirms[2], ok[2]
+    if s30:
+        lines.append(f"شروع فرم ← تایید پیش‌نمایش: {_fa(round(100 * c30 / s30))}٪")
+    if c30:
+        lines.append(f"تایید پیش‌نمایش ← استعلام موفق: {_fa(round(100 * o30 / c30))}٪")
+    lines += ["", "— فروش —",
+              row("🧪 درخواست تست", trials),
+              row("💳 پرداخت", [p["n"] for p in pays]),
+              row("💰 درآمد (تومان)", [p["s"] // 10 for p in pays])]
+
+    pending_trials = db.query_one("SELECT COUNT(*) n FROM trial_requests WHERE status='pending'")["n"]
+    active_subs = db.query_one("SELECT COUNT(*) n FROM subscriptions WHERE expires_at>?", (now,))["n"]
+    expiring = db.query_one("SELECT COUNT(*) n FROM subscriptions WHERE expires_at>? AND expires_at<=?",
+                            (now, now + 7 * 86400))["n"]
+    lines += ["", "— وضعیت فعلی —",
+              f"💳 مشترکان فعال: {_fa(active_subs)} (پایان در ۷ روز آینده: {_fa(expiring)})",
+              f"✅ کاربران رایگانِ ادمین: {_fa(db.query_one('SELECT COUNT(*) n FROM approved_users')['n'])}",
+              f"⏳ درخواست تست در انتظار: {_fa(pending_trials)}",
+              f"📂 کل استعلام‌های ثبت‌شده: {_fa(db.query_one('SELECT COUNT(*) n FROM queries')['n'])}"]
+
+    top = db.query("SELECT province, COUNT(*) n FROM queries WHERE created_at>=? GROUP BY province "
+                   "ORDER BY n DESC LIMIT 5", (now - 30 * 86400,))
+    if top:
+        lines += ["", "— پرکاربردترین استان‌ها (۳۰ روز) —"]
+        lines += [f"{_fa(i)}. {r['province']}: {_fa(r['n'])}" for i, r in enumerate(top, 1)]
+    fails = db.query("SELECT detail, created_at FROM events WHERE kind='query_fail' ORDER BY id DESC LIMIT 3")
+    if fails:
+        lines += ["", "— آخرین خطاهای سیستمی —"]
+        lines += [f"• {(r['detail'] or '-').splitlines()[0][:120]}" for r in fails]
+    return "\n".join(lines)
+
+
+@admin_router.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if not _is_admin(message):
+        return
+    try:
+        await message.answer(build_stats_text())
+    except Exception as e:
+        logger.error(f"[ADMIN] ساخت آمار ناموفق: {e}", exc_info=True)
+        await message.answer(f"⚠️ ساخت آمار ناموفق بود: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
+# /rates — به‌روزرسانی جدول نرخ اعیانی با اکسل (از داخل ربات)
+# ══════════════════════════════════════════════════════════════════
+def _pending_rates_path() -> str:
+    import os
+    from config import DATA_DIR
+    return os.path.join(DATA_DIR, "rates_pending.json")
+
+
+@admin_router.message(Command("rates"))
+async def cmd_rates(message: Message):
+    if not _is_admin(message):
+        return
+    import os
+    import tempfile
+    import rates_admin
+    from bale_file_sender import send_document_direct
+
+    path = os.path.join(tempfile.gettempdir(), f"ayani_rates_{time.time_ns()}.xlsx")
+    try:
+        rates_admin.export_xlsx(path)
+        await send_document_direct(
+            chat_id=message.chat.id, file_path=path, filename="نرخ_اعیانی.xlsx",
+            caption=("📊 جدول نرخ اعیانی فعلی\n\n" + rates_admin.describe_current() + "\n\n"
+                     "نرخ‌های جدید را در همین فایل وارد کنید (ساختار ستون‌ها تغییر نکند) و فایل را برای ربات "
+                     "بفرستید. قبل از اعمال، خلاصهٔ تغییرات برای تایید نمایش داده می‌شود.\n"
+                     "بازگرداندن نسخهٔ قبلی: /rates_rollback"),
+        )
+    except Exception as e:
+        logger.error(f"[ADMIN] ساخت اکسل نرخ‌ها ناموفق: {e}", exc_info=True)
+        await message.answer(f"⚠️ ساخت فایل اکسل ناموفق بود: {e}")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+@admin_router.message(F.document & F.document.file_name.lower().endswith(".xlsx")
+                      & (F.from_user.id == (ADMIN_ID or -1)))
+async def admin_xlsx_upload(message: Message):
+    """اکسل ارسالی ادمین: اگر برگهٔ «اشتراک‌ها» دارد → اکسل اشتراک‌ها؛ وگرنه → نرخ اعیانی."""
+    import json
+    import os
+    import tempfile
+    import rates_admin
+    import subs_admin
+
+    path = os.path.join(tempfile.gettempdir(), f"admin_upload_{time.time_ns()}.xlsx")
+    try:
+        await message.bot.download(message.document, destination=path)
+        if subs_admin.is_subs_workbook(path):
+            await _handle_subs_upload(message, path)
+            return
+        res = rates_admin.parse_xlsx(path)
+    except Exception as e:
+        logger.error(f"[ADMIN] دریافت/خواندن اکسل نرخ‌ها ناموفق: {e}", exc_info=True)
+        await message.answer(f"⚠️ دریافت یا خواندن فایل ناموفق بود: {e}")
+        return
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    if not res["ok"]:
+        errs = res["errors"]
+        await message.answer("❌ فایل پذیرفته نشد:\n" + "\n".join(f"• {e}" for e in errs[:20])
+                             + (f"\n... و {len(errs) - 20} خطای دیگر" if len(errs) > 20 else ""))
+        return
+    if res["changed"] == 0 and not res["added"] and not res["removed"]:
+        await message.answer("ℹ️ این فایل با نرخ‌های فعلی یکسان است؛ تغییری برای اعمال وجود ندارد.")
+        return
+    with open(_pending_rates_path(), "w", encoding="utf-8") as f:
+        json.dump(res["rates"], f, ensure_ascii=False)
+    text = "📋 *پیش‌نمایش به‌روزرسانی نرخ اعیانی*\n\n" + res["summary"]
+    if res["warnings"]:
+        text += "\n\n⚠️ هشدارها:\n" + "\n".join(f"• {w}" for w in res["warnings"])
+    text += "\n\nبا «اعمال»، نسخهٔ فعلی پشتیبان‌گیری و نرخ‌های جدید بلافاصله فعال می‌شود."
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ اعمال", callback_data="rates_apply"),
+        InlineKeyboardButton(text="❌ انصراف", callback_data="rates_cancel"),
+    ]])
+    await message.answer(text, reply_markup=kb)
+
+
+@admin_router.callback_query(F.data.in_({"rates_apply", "rates_cancel"}))
+async def cb_rates_decision(callback: CallbackQuery):
+    if ADMIN_ID is None or callback.from_user.id != ADMIN_ID:
+        await callback.answer("دسترسی ندارید.")
+        return
+    import json
+    import os
+    import rates_admin
+
+    pending = _pending_rates_path()
+    if not os.path.exists(pending):
+        await callback.answer("درخواست فعالی وجود ندارد.")
+        return
+    if callback.data == "rates_cancel":
+        os.remove(pending)
+        await callback.answer("لغو شد.")
+        await callback.message.answer("❌ به‌روزرسانی نرخ‌ها لغو شد.")
+        return
+    try:
+        with open(pending, encoding="utf-8") as f:
+            new_rates = json.load(f)
+        backup = rates_admin.apply_rates(new_rates)
+        os.remove(pending)
+    except Exception as e:
+        logger.error(f"[ADMIN] اعمال نرخ‌های جدید ناموفق: {e}", exc_info=True)
+        await callback.answer("خطا")
+        await callback.message.answer(f"🛑 اعمال نرخ‌ها ناموفق بود (نرخ‌های قبلی همچنان فعال است): {e}")
+        return
+    await callback.answer("اعمال شد.")
+    await callback.message.answer(
+        "✅ نرخ‌های جدید فعال شد.\n\n" + rates_admin.describe_current()
+        + f"\n\n💾 نسخهٔ قبلی: {os.path.basename(backup)}\nبازگرداندن: /rates_rollback")
+
+
+@admin_router.message(Command("rates_rollback"))
+async def cmd_rates_rollback(message: Message):
+    if not _is_admin(message):
+        return
+    import rates_admin
+    try:
+        name = rates_admin.rollback()
+    except Exception as e:
+        await message.answer(f"🛑 بازگرداندن ناموفق بود: {e}")
+        return
+    if not name:
+        await message.answer("ℹ️ نسخهٔ پشتیبانی وجود ندارد.")
+        return
+    await message.answer(f"↩️ نسخهٔ {name} بازگردانده شد.\n\n" + rates_admin.describe_current())
+
+
+
+# ══════════════════════════════════════════════════════════════════
+# /subs_excel — مدیریت اشتراک‌ها با اکسل
+# ══════════════════════════════════════════════════════════════════
+def _pending_subs_path() -> str:
+    import os
+    from config import DATA_DIR
+    return os.path.join(DATA_DIR, "subs_pending.json")
+
+
+@admin_router.message(Command("subs_excel"))
+async def cmd_subs_excel(message: Message):
+    if not _is_admin(message):
+        return
+    import os
+    import tempfile
+    import subs_admin
+    from bale_file_sender import send_document_direct
+
+    path = os.path.join(tempfile.gettempdir(), f"subs_{time.time_ns()}.xlsx")
+    try:
+        n = subs_admin.export_xlsx(path)
+        active = db_count_active()
+        await send_document_direct(
+            chat_id=message.chat.id, file_path=path,
+            filename=f"اشتراک‌ها_{subs_admin.ts_to_jalali_str(time.time()).replace('/', '-')}.xlsx",
+            caption=(f"📋 اکسل اشتراک‌ها — {n} آیدی ({active} اشتراک فعال)\n\n"
+                     "• افزودن اشتراک دستی: ردیف جدید با آیدی عددی و تاریخ پایان (یا تعداد روز)\n"
+                     "• تمدید/اصلاح: تغییر تاریخ پایان یا روزهای باقی‌مانده\n"
+                     "• نام و کد دفتر هر آیدی را در ستون‌های مربوط وارد کنید\n\n"
+                     "فایل ویرایش‌شده را برای ربات بفرستید؛ قبل از ثبت، تغییرات برای تایید نمایش داده می‌شود."),
+        )
+    except Exception as e:
+        logger.error(f"[ADMIN] ساخت اکسل اشتراک‌ها ناموفق: {e}", exc_info=True)
+        await message.answer(f"⚠️ ساخت اکسل اشتراک‌ها ناموفق بود: {e}")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def db_count_active() -> int:
+    import db
+    return db.query_one("SELECT COUNT(*) n FROM subscriptions WHERE expires_at>?", (time.time(),))["n"]
+
+
+async def _handle_subs_upload(message: Message, path: str):
+    import json
+    import subs_admin
+
+    res = subs_admin.parse_xlsx(path)
+    if not res["ok"]:
+        errs = res["errors"]
+        await message.answer("❌ اکسل اشتراک‌ها پذیرفته نشد:\n" + "\n".join(f"• {e}" for e in errs[:20])
+                             + (f"\n... و {len(errs) - 20} خطای دیگر" if len(errs) > 20 else ""))
+        return
+    if not res["actions"]:
+        await message.answer("ℹ️ تغییری نسبت به اطلاعات فعلی در این فایل نیست.")
+        return
+    with open(_pending_subs_path(), "w", encoding="utf-8") as f:
+        json.dump(res["actions"], f, ensure_ascii=False)
+    changes = res["changes"]
+    text = "📋 *پیش‌نمایش تغییرات اشتراک‌ها*\n\n" + res["summary"] + "\n\n" + "\n".join(changes[:25])
+    if len(changes) > 25:
+        text += f"\n... و {len(changes) - 25} مورد دیگر"
+    text += "\n\nبا «اعمال»، تغییرات ثبت و به کاربرانی که اشتراکشان جدید/تمدید شده اطلاع داده می‌شود."
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ اعمال", callback_data="subs_apply"),
+        InlineKeyboardButton(text="❌ انصراف", callback_data="subs_cancel"),
+    ]])
+    await message.answer(text, reply_markup=kb)
+
+
+@admin_router.callback_query(F.data.in_({"subs_apply", "subs_cancel"}))
+async def cb_subs_decision(callback: CallbackQuery):
+    if ADMIN_ID is None or callback.from_user.id != ADMIN_ID:
+        await callback.answer("دسترسی ندارید.")
+        return
+    import json
+    import os
+    import subs_admin
+    from keyboards import main_menu_kb
+
+    pending = _pending_subs_path()
+    if not os.path.exists(pending):
+        await callback.answer("درخواست فعالی وجود ندارد.")
+        return
+    if callback.data == "subs_cancel":
+        os.remove(pending)
+        await callback.answer("لغو شد.")
+        await callback.message.answer("❌ تغییرات اشتراک‌ها ثبت نشد.")
+        return
+    try:
+        with open(pending, encoding="utf-8") as f:
+            actions = json.load(f)
+        notify = await subs_admin.apply_actions(actions)
+        os.remove(pending)
+    except Exception as e:
+        logger.error(f"[ADMIN] اعمال اکسل اشتراک‌ها ناموفق: {e}", exc_info=True)
+        await callback.answer("خطا")
+        await callback.message.answer(f"🛑 ثبت تغییرات ناموفق بود: {e}")
+        return
+    sent = 0
+    for uid, exp, plan in notify:
+        try:
+            await callback.bot.send_message(
+                uid, f"✅ {access_control.plan_title(plan)} شما توسط مدیر سامانه تا "
+                     f"{_fa(subs_admin.ts_to_jalali_str(exp))} فعال شد.", reply_markup=main_menu_kb())
+            sent += 1
+        except Exception as e:
+            logger.warning(f"[ADMIN] اطلاع‌رسانی اشتراک به {uid} ناموفق: {e}")
+    await callback.answer("ثبت شد.")
+    await callback.message.answer(
+        f"✅ تغییرات {len(actions)} آیدی ثبت شد."
+        + (f"\n📨 به {sent} کاربر اطلاع داده شد." if notify else "")
+        + "\nاکسل به‌روز: /subs_excel")
+
+
+@admin_router.message(Command("office"))
+async def cmd_office(message: Message):
+    if not _is_admin(message):
+        return
+    parts = (message.text or "").split(maxsplit=3)
+    if len(parts) < 3 or not parts[1].isdigit():
+        await message.answer("فرمت درست: /office آیدی_عددی کد_دفتر نام دفتر\n"
+                             "مثال: /office 123456789 1234 دفتر خدمات الکترونیک قضایی شمارهٔ ۱۲ تهران")
+        return
+    uid, code = int(parts[1]), parts[2]
+    name = parts[3] if len(parts) > 3 else None
+    access_control.set_office_info(uid, office_name=name, office_code=code)
+    access_control.refresh_subs_excel()
+    info = access_control.get_office_info(uid)
+    await message.answer(f"✅ ثبت شد — آیدی {uid}\n🏢 {info.get('office_name') or '—'}\n🔢 کد دفتر: {info.get('office_code')}")

@@ -9,6 +9,9 @@
     را لاگ و به ادمین گزارش می‌کند — بدون این‌که کل ربات متوقف شود.
   • حلقهٔ polling در یک try/except بیرونی قرار دارد و در صورت قطع شدن
     غیرمنتظره (قطعی شبکه و ...) خودش را دوباره راه‌اندازی می‌کند.
+  • وضعیت فرم کاربران در SQLite نگه داشته می‌شود (sqlite_storage)؛ ری‌استارت ربات
+    فرم نیمه‌کارهٔ کسی را پاک نمی‌کند.
+  • یک وظیفهٔ پس‌زمینه، یادآوری تمدید اشتراک را ارسال می‌کند.
 """
 
 import asyncio
@@ -19,15 +22,15 @@ from concurrent.futures import ThreadPoolExecutor
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ErrorEvent, Message
+from aiogram.types import ErrorEvent
 
-from config import BOT_TOKEN, BALE_API_BASE, ADMIN_ID, NESHAN_API_KEY, EXECUTOR_MAX_WORKERS
-from regional_value_handlers import regional_value_router, regional_value_entry
+import db
+from config import (BOT_TOKEN, BALE_API_BASE, ADMIN_ID, NESHAN_API_KEY, EXECUTOR_MAX_WORKERS,
+                    RENEW_CHECK_INTERVAL, RENEW_REMIND_DAYS)
+from regional_value_handlers import regional_value_router
+from menu_handlers import menu_router, renew_reminder_loop
 from admin_commands import admin_router
-from keyboards import main_menu_kb, is_main_menu_button
+from sqlite_storage import SQLiteStorage
 from bale_retry import BaleRetryMiddleware, is_transient_error
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -46,7 +49,9 @@ session = AiohttpSession(api=custom_api_server)
 session.middleware(BaleRetryMiddleware())
 bot = Bot(token=BOT_TOKEN, session=session)
 
-dp = Dispatcher(storage=MemoryStorage())
+# پایگاه داده (و انتقال خودکار فایل‌های JSON نسخهٔ قبلی در اولین اجرا)
+db.init()
+dp = Dispatcher(storage=SQLiteStorage())
 
 # ═══ لاگ کندی: هر آپدیتی که پردازشش بیش از SLOW_UPDATE_SECONDS طول بکشد ثبت می‌شود ═══
 SLOW_UPDATE_SECONDS = 2.0
@@ -67,21 +72,10 @@ async def _timing_middleware(handler, event, data):
             logger.warning(f"[SLOW] {elapsed:.1f}s | user={user} | state={state} | text={text!r}")
 
 dp.include_router(admin_router)
+# منوی اصلی (/start، سوابق، اصالت، حساب کاربری، گزارش تجمیعی) قبل از فرم استعلام —
+# تا دکمه‌های منو در هر مرحله‌ای کار کنند
+dp.include_router(menu_router)
 dp.include_router(regional_value_router)
-
-
-@dp.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()  # /start همیشه کاربر را از هر مرحله‌ای به منوی اصلی برمی‌گرداند
-    await message.answer(
-        "👋 به ربات استعلام ارزش منطقه‌ای خوش آمدید.\n\nبرای شروع، دکمهٔ زیر را بزنید:",
-        reply_markup=main_menu_kb(),
-    )
-
-
-@dp.message(lambda m: bool(m.text) and is_main_menu_button(m.text))
-async def start_regional_value(message: Message, state: FSMContext):
-    await regional_value_entry(message, state)
 
 
 # ═══ هندلر خطای سراسری — هیچ استثنایی نباید کل ربات را متوقف کند ═══
@@ -115,14 +109,19 @@ async def main():
     loop.set_default_executor(ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS))
 
     logger.info("در حال راه‌اندازی ربات...")
-    while True:
-        try:
-            await dp.start_polling(bot)
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as e:
-            logger.error(f"[MAIN] polling با خطا متوقف شد، ۵ ثانیه دیگر دوباره تلاش می‌شود: {e}", exc_info=True)
-            await asyncio.sleep(5)
+    reminder_task = asyncio.create_task(renew_reminder_loop(bot, RENEW_REMIND_DAYS, RENEW_CHECK_INTERVAL))
+    try:
+        while True:
+            try:
+                await dp.start_polling(bot)
+                break  # توقف عادی (Ctrl+C / SIGTERM) — دوباره راه‌اندازی نشود
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as e:
+                logger.error(f"[MAIN] polling با خطا متوقف شد، ۵ ثانیه دیگر دوباره تلاش می‌شود: {e}", exc_info=True)
+                await asyncio.sleep(5)
+    finally:
+        reminder_task.cancel()
 
 
 if __name__ == "__main__":
