@@ -14,6 +14,8 @@ admin_commands.py — دستورهای مدیریتی، فقط برای ADMIN_ID
 /subs_excel             — اکسل همهٔ مشترکان (با نام و کد دفتر)؛ ارسال اکسل ویرایش‌شده = افزودن/تغییر اشتراک‌ها (با تایید)
 /diyeh_rate [سال مبلغ]  — نمایش/ثبت مبلغ دیهٔ کامل سال (ریال)
 /office <آیدی> <کد دفتر> <نام دفتر> — ثبت نام و کد دفتر خدمات قضایی برای یک آیدی
+/admin                  — فهرست همهٔ دستورهای مدیر
+(پیام همگانی، کد تخفیف، بکاپ، وضعیت سامانهٔ مالیاتی و پشتیبانی: ops_handlers.py)
 دکمه‌های «✅ تایید / ❌ رد» زیر پیام درخواست تست — تایید = ۲ استعلام رایگان
 """
 import logging
@@ -597,3 +599,48 @@ async def cmd_diyeh_rate(message: Message):
     last = list(dyc.full_diyeh_table().items())[-5:]
     await message.answer("⚖️ مبلغ دیهٔ کامل (ریال):\n" + "\n".join(f"• {_fa(y)}: {_fa(f'{v:,}')}" for y, v in last)
                          + "\n\nثبت یا اصلاح سال جدید:\n/diyeh_rate 1406 27000000000")
+
+
+ADMIN_HELP = """🛠 دستورهای مدیر
+
+👥 کاربران و اشتراک‌ها
+/approve آیدی — دسترسی رایگان دائمی
+/revoke آیدی — حذف دسترسی رایگان
+/approved — فهرست تأییدشده‌ها
+/subs — مشترکان فعال
+/addsub آیدی monthly|yearly — فعال‌سازی دستی اشتراک
+/credit آیدی تعداد — استعلام رایگان
+/subs_excel — اکسل مشترکان (ارسال اکسل ویرایش‌شده = اعمال)
+/office آیدی کد_دفتر نام دفتر — ثبت دفتر
+
+📊 آمار و نرخ‌ها
+/stats — آمار استفاده و فروش
+/rates — اکسل نرخ اعیانی (ارسال اکسل = به‌روزرسانی)
+/rates_rollback — برگشت نرخ‌ها
+/diyeh_rate [سال مبلغ] — مبلغ دیهٔ کامل
+
+📈 شاخص تورم
+/cpi [1405/06 شاخص] — وضعیت/ثبت
+/cpi_fetch — دریافت از بانک مرکزی
+/cpi_year سال شاخص — شاخص سالانه
+فایل با کپشن /cpi_pdf یا /cpi_import
+
+📣 فروش و ارتباط
+/broadcast — پیام همگانی بر اساس گروه کاربران
+/discount_new کد درصد [سقف] [روز] [rv|util|all] — کد تخفیف
+/discounts — فهرست کدها
+/discount_off کد — غیرفعال‌سازی
+پاسخ پشتیبانی: دکمهٔ «پاسخ» یا Reply روی پیام کاربر (/cancel انصراف)
+
+⚙️ نگهداری
+/backup — بکاپ فوری (خودکار هر شب)
+/taxstatus — وضعیت سامانهٔ مالیاتی
+/taxcheck — بررسی فوری سامانه
+/maptest — آزمایش نقشهٔ نشان در PDF"""
+
+
+@admin_router.message(Command("admin"))
+async def cmd_admin_help(message: Message):
+    if not _is_admin(message):
+        return
+    await message.answer(ADMIN_HELP)

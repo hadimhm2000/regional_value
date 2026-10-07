@@ -41,7 +41,7 @@ import damages_calc as dc
 import db
 import stamp_duty as sd
 from config import ADMIN_ID, UTIL_FREE_PER_TOOL, UTIL_SUBSCRIPTION_PLANS
-from keyboards import UTIL_BUTTON, is_back, is_button, is_restart, main_menu_kb
+from keyboards import DISCOUNT_BUTTON, UTIL_BUTTON, discount_percent, is_back, is_button, is_restart, main_menu_kb
 
 logger = logging.getLogger(__name__)
 
@@ -158,8 +158,11 @@ async def _to_main(message: Message, state: FSMContext):
 # ══════════════════════════════════════════════════════════════════
 # دسترسی: اعتبار رایگان هر بخش ← اشتراک خدمات کاربردی
 # ══════════════════════════════════════════════════════════════════
-def _plan_button(key: str) -> str:
+def _plan_button(key: str, percent: int = 0) -> str:
     p = UTIL_SUBSCRIPTION_PLANS[key]
+    if percent:
+        from payment import plan_price
+        return f"🔹 {p['title']} — {_toman(plan_price('util', key, percent)[0])} تومان ({_fa(percent)}٪ تخفیف)"
     return f"🔹 {p['title']} — {_toman(p['toman'])} تومان"
 
 
@@ -167,8 +170,11 @@ def _toman(n: int) -> str:
     return _fa(f"{n:,}")
 
 
-def _plan_kb() -> ReplyKeyboardMarkup:
-    return _kb([[_plan_button("monthly")], [_plan_button("yearly")], [BACK_TEXT, MAIN_MENU_TEXT]])
+def _plan_kb(percent: int = 0) -> ReplyKeyboardMarkup:
+    rows = [[_plan_button("monthly", percent)], [_plan_button("yearly", percent)]]
+    if not percent:
+        rows.append([DISCOUNT_BUTTON])
+    return _kb(rows + [[BACK_TEXT, MAIN_MENU_TEXT]])
 
 
 def _plans_text() -> str:
@@ -201,7 +207,7 @@ async def _gate(message: Message, state: FSMContext, tool: str) -> bool:
         "برای ادامه، *اشتراک خدمات کاربردی* را تهیه کنید؛ یک اشتراک برای هر چهار بخش معتبر است:\n"
         + "\n".join(f"• {t}" for t in TOOLS.values()) + "\n\n" + _plans_text()
         + "\n\n(این اشتراک جدا از اشتراک استعلام ارزش منطقه‌ای است.)",
-        reply_markup=_plan_kb())
+        reply_markup=_plan_kb(discount_percent(await state.get_data(), "util")))
     await state.set_state(UtilForm.plan)
     db.log_event("util_paywall", user_id, tool)
     return False
@@ -265,8 +271,11 @@ async def _back_to_menu(message: Message, state: FSMContext):
 # ══════════════════════════════════════════════════════════════════
 async def offer_plans(message: Message, state: FSMContext, prefix: str = ""):
     """نمایش پلن‌ها (از «حساب کاربری» یا یادآوری تمدید)."""
-    await message.answer(prefix + "💳 *اشتراک خدمات کاربردی*\n\n" + _plans_text()
-                         + "\n\nاشتراک مورد نظر را انتخاب کنید:", reply_markup=_plan_kb())
+    data = await state.get_data()
+    percent = discount_percent(data, "util")
+    note = f"🎟 کد تخفیف {data['discount']['code']} ({_fa(percent)}٪) اعمال شد.\n\n" if percent else ""
+    await message.answer(prefix + note + "💳 *اشتراک خدمات کاربردی*\n\n" + _plans_text()
+                         + "\n\nاشتراک مورد نظر را انتخاب کنید:", reply_markup=_plan_kb(percent))
     await state.set_state(UtilForm.plan)
 
 
@@ -279,14 +288,21 @@ async def util_plan(message: Message, state: FSMContext, bot: Bot):
     if is_back(text):
         await _show_menu(message, state)
         return
-    plan = next((k for k in UTIL_SUBSCRIPTION_PLANS if text.strip() == _plan_button(k)), None)
+    data = await state.get_data()
+    percent = discount_percent(data, "util")
+    if text == DISCOUNT_BUTTON:
+        from ops_handlers import ask_discount_code
+        await ask_discount_code(message, state, "util")
+        return
+    plan = next((k for k in UTIL_SUBSCRIPTION_PLANS if text.strip() == _plan_button(k, percent)), None)
     if not plan:
         plan = "monthly" if "ماهانه" in text else "yearly" if ("سالانه" in text or "سالیانه" in text) else None
     if not plan:
-        await message.answer("⚠️ لطفاً یکی از گزینه‌های ماهانه یا سالانه را انتخاب کنید.", reply_markup=_plan_kb())
+        await message.answer("⚠️ لطفاً یکی از گزینه‌های ماهانه یا سالانه را انتخاب کنید.", reply_markup=_plan_kb(percent))
         return
     from payment import send_subscription_invoice
-    if await send_subscription_invoice(bot, message.from_user.id, plan, product="util"):
+    if await send_subscription_invoice(bot, message.from_user.id, plan, product="util",
+                                       discount=data.get("discount") if percent else None):
         await state.set_state(UtilForm.payment)
         await message.answer(
             f"💳 فاکتور {UTIL_SUBSCRIPTION_PLANS[plan]['title']} ارسال شد؛ لطفاً آن را پرداخت کنید.\n"
@@ -298,7 +314,7 @@ async def util_plan(message: Message, state: FSMContext, bot: Bot):
             except Exception:
                 pass
         await message.answer("⚠️ در حال حاضر امکان ساخت فاکتور پرداخت نیست. لطفاً کمی بعد تلاش کنید.",
-                             reply_markup=_plan_kb())
+                             reply_markup=_plan_kb(percent))
 
 
 @utilities_router.message(UtilForm.payment)
@@ -318,29 +334,16 @@ async def on_util_payment(message: Message, state: FSMContext, bot: Bot, payload
     user_id = message.from_user.id
     plan_key = payload.get("plan")
     plan = UTIL_SUBSCRIPTION_PLANS.get(plan_key)
-    sp = message.successful_payment
     if not plan:
         logger.error(f"[UTIL-PAYMENT] پلن نامعتبر در پرداخت کاربر {user_id}: {payload}")
         if ADMIN_ID:
             await bot.send_message(ADMIN_ID, f"⚠️ پرداخت خدمات کاربردی با پلن ناشناخته از {user_id}: {payload}")
         await message.answer("✅ پرداخت دریافت شد؛ فعال‌سازی با خطا مواجه شد و به ادمین اطلاع داده شد.")
         return
-    sub = await access_control.activate_subscription(user_id, plan_key, plan["days"], product="util")
-    try:
-        access_control.record_payment(user_id, f"util:{plan_key}", getattr(sp, "total_amount", plan["rial"]),
-                                      getattr(sp, "provider_payment_charge_id", "") or "")
-        db.log_event("payment", user_id, f"util:{plan_key}")
-    except Exception as e:
-        logger.error(f"[UTIL-PAYMENT] ثبت پرداخت {user_id} ناموفق: {e}", exc_info=True)
-    if ADMIN_ID:
-        office = access_control.get_office_info(user_id)
-        try:
-            await bot.send_message(
-                ADMIN_ID,
-                f"💳 خرید {plan['title']} — {getattr(message.from_user, 'full_name', '')} ({user_id})\n"
-                f"🏢 دفتر: {office.get('office_name') or 'ثبت نشده'} — کد: {office.get('office_code') or 'ثبت نشده'}")
-        except Exception:
-            pass
+    import billing
+    sub = await billing.complete_payment(message, bot, "util", plan_key, payload)
+    if not sub:
+        return
     from menu_handlers import fa_date
     await state.clear()
     await _show_menu(message, state, f"✅ پرداخت تایید شد و {plan['title']} تا {fa_date(sub['expires_at'])} فعال است.\n\n")

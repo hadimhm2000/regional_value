@@ -76,6 +76,7 @@ class Harness:
     def __init__(self, monkeypatch):
         import admin_commands
         import menu_handlers
+        import ops_handlers
         import regional_value_handlers as rvh
         import utilities_handlers
         from aiogram import Router
@@ -86,13 +87,17 @@ class Harness:
         self.bot = Bot("123456:TEST-TOKEN", session=self.session)
         self.dp = Dispatcher(storage=SQLiteStorage())
         # روترها ماژول-سطح هستند؛ برای هر تست یک روتر والد تازه می‌سازیم
-        routers = (admin_commands.admin_router, menu_handlers.menu_router,
+        routers = (admin_commands.admin_router, ops_handlers.ops_router, menu_handlers.menu_router,
                    utilities_handlers.utilities_router, rvh.regional_value_router)
         for r in routers:
             r._parent_router = None
         parent = Router()
         parent.include_routers(*routers)
         self.dp.include_router(parent)
+        self.dp.update.outer_middleware()(ops_handlers.track_users_middleware)
+        monkeypatch.setattr(ops_handlers, "BROADCAST_DELAY", 0)
+        import map_image
+        monkeypatch.setattr(map_image, "fetch_png", lambda *a, **k: None)   # بدون اینترنت
         self.ids = itertools.count(1)
         self.cb_ids = itertools.count(1)
 
