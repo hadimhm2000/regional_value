@@ -2,11 +2,13 @@
 """
 utilities_handlers.py — گزینهٔ «🧰 خدمات کاربردی» منوی اصلی.
 
-چهار بخش (منطق محاسبه از پروژهٔ online.judicial.services.ble منتقل شده است):
+بخش‌ها:
   📈 خسارت تأخیر و مهریه  — damages_calc.py + damages_pdf.py (شاخص تورم بانک مرکزی)
   🧾 محاسبه هزینه دادرسی  — court_fee.py
   💰 محاسبه تمبر          — stamp_duty.py (تمبر و حق‌الوکاله / تمبر بر اساس حق‌الوکاله)
   🛠 ابزار فایل           — کاهش حجم عکس، تبدیل PDF به عکس
+  ⚖️ محاسبه دیه           — diyeh_calc.py (هندلرها در legal_tools_handlers.py)
+  👪 محاسبه سهم‌الارث     — inheritance_calc.py (هندلرها در legal_tools_handlers.py)
 
 دسترسی (access_control.util_access):
   • هر بخش config.UTIL_FREE_PER_TOOL بار (پیش‌فرض ۱) رایگان است؛
@@ -50,6 +52,8 @@ TOOLS = {
     "court_fee": "🧾 محاسبه هزینه دادرسی",
     "stamp": "💰 محاسبه تمبر",
     "file_tools": "🛠 ابزار فایل",
+    "diyeh": "⚖️ محاسبه دیه",
+    "inheritance": "👪 محاسبه سهم‌الارث",
 }
 MAIN_MENU_TEXT = "🏠 منوی اصلی"
 BACK_TEXT = "🔙 بازگشت"
@@ -73,6 +77,19 @@ class UtilForm(StatesGroup):
     ft_menu = State()
     ft_image = State()
     ft_pdf = State()
+    dy_year = State()
+    dy_method = State()
+    dy_cat = State()
+    dy_item = State()
+    dy_count = State()
+    dy_sex = State()
+    dy_holy = State()
+    dy_percent = State()
+    dy_fraction = State()
+    inh_marital = State()
+    inh_wives = State()
+    inh_board = State()
+    inh_estate = State()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -82,7 +99,8 @@ def _kb(rows) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=t) for t in r] for r in rows], resize_keyboard=True)
 
 
-menu_kb = _kb([[TOOLS["damages"], TOOLS["court_fee"]], [TOOLS["stamp"], TOOLS["file_tools"]], [MAIN_MENU_TEXT]])
+menu_kb = _kb([[TOOLS["damages"], TOOLS["court_fee"]], [TOOLS["stamp"], TOOLS["file_tools"]],
+               [TOOLS["diyeh"], TOOLS["inheritance"]], [MAIN_MENU_TEXT]])
 back_kb = _kb([[BACK_TEXT, MAIN_MENU_TEXT]])
 
 DMG_LATE_TEXT = "💸 خسارت تأخیر تأدیه (چک، سفته، مطالبه وجه)"
@@ -919,7 +937,7 @@ async def ft_other(message: Message, state: FSMContext):
 
 
 ENTRY = {"damages": damages_entry, "court_fee": court_fee_entry, "stamp": stamp_entry,
-         "file_tools": file_tools_entry}
+         "file_tools": file_tools_entry}   # دیه و ارث در legal_tools_handlers اضافه می‌شوند
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1136,3 +1154,7 @@ async def cpi_reminder_loop(bot: Bot, check_every_seconds: int = 3600):
             break
         except Exception as e:
             logger.error(f"[CPI] خطا در دریافت/یادآوری ماهانه: {e}")
+
+
+# دیه و سهم‌الارث — هندلرها روی همین روتر ثبت و به ENTRY اضافه می‌شوند
+import legal_tools_handlers  # noqa: E402,F401
