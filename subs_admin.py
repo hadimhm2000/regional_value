@@ -34,9 +34,12 @@ COLUMNS = [
     ("user_id", "آیدی عددی بله", True),
     ("office_name", "نام دفتر خدمات قضایی", True),
     ("office_code", "کد دفتر", True),
-    ("plan", "نوع اشتراک", True),
-    ("expires", "تاریخ پایان (شمسی)", True),
-    ("days_left", "روزهای باقی‌مانده", True),
+    ("plan", "نوع اشتراک ارزش منطقه‌ای", True),
+    ("expires", "پایان اشتراک ارزش منطقه‌ای (شمسی)", True),
+    ("days_left", "روزهای باقی‌مانده (ارزش منطقه‌ای)", True),
+    ("util_plan", "نوع اشتراک خدمات کاربردی", True),
+    ("util_expires", "پایان اشتراک خدمات کاربردی (شمسی)", True),
+    ("util_days", "روزهای باقی‌مانده (خدمات کاربردی)", True),
     ("approved", "دسترسی رایگان دائمی", True),
     ("status", "وضعیت", False),
     ("full_name", "نام در بله", False),
@@ -48,6 +51,14 @@ COLUMNS = [
 ]
 HEADERS = [t for _, t, _ in COLUMNS]
 IDX = {k: i for i, (k, _, _) in enumerate(COLUMNS)}
+
+# ستون‌های اشتراک هر محصول (rv = استعلام ارزش منطقه‌ای، util = خدمات کاربردی)
+PRODUCT_COLS = {
+    "rv": {"plan": "plan", "expires": "expires", "days": "days_left", "ts": "_expires_at",
+           "title": "اشتراک ارزش منطقه‌ای"},
+    "util": {"plan": "util_plan", "expires": "util_expires", "days": "util_days", "ts": "_util_expires_at",
+             "title": "اشتراک خدمات کاربردی"},
+}
 
 PLAN_LABELS = {"monthly": "ماهانه", "yearly": "سالانه", "manual": "دستی"}
 _LABEL_TO_PLAN = {"ماهانه": "monthly", "سالانه": "yearly", "سالیانه": "yearly", "دستی": "manual",
@@ -167,10 +178,11 @@ def collect_rows(now: float = None) -> list:
     """همهٔ کاربرانی که اشتراک (فعال/منقضی)، دسترسی رایگان یا مشخصات دفتر دارند."""
     now = now or time.time()
     ids = set()
-    for sql in ("SELECT user_id FROM subscriptions", "SELECT user_id FROM approved_users",
-                "SELECT user_id FROM subscriber_info"):
+    for sql in ("SELECT user_id FROM subscriptions", "SELECT user_id FROM util_subscriptions",
+                "SELECT user_id FROM approved_users", "SELECT user_id FROM subscriber_info"):
         ids |= {r["user_id"] for r in db.query(sql)}
     subs = {r["user_id"]: dict(r) for r in db.query("SELECT * FROM subscriptions")}
+    usubs = {r["user_id"]: dict(r) for r in db.query("SELECT * FROM util_subscriptions")}
     approved = {r["user_id"] for r in db.query("SELECT user_id FROM approved_users")}
     info = {r["user_id"]: dict(r) for r in db.query("SELECT * FROM subscriber_info")}
     trials = {r["user_id"]: dict(r) for r in db.query("SELECT * FROM trial_requests")}
@@ -180,12 +192,13 @@ def collect_rows(now: float = None) -> list:
     rows = []
     for uid in ids:
         s, inf, tr, pay = subs.get(uid), info.get(uid, {}), trials.get(uid, {}), pays.get(uid)
+        u = usubs.get(uid)
         is_appr = uid in approved
         if is_appr:
             status = "رایگان دائمی"
-        elif s and s["expires_at"] > now:
+        elif (s and s["expires_at"] > now) or (u and u["expires_at"] > now):
             status = "فعال"
-        elif s:
+        elif s or u:
             status = "منقضی"
         else:
             status = "بدون اشتراک"
@@ -196,6 +209,9 @@ def collect_rows(now: float = None) -> list:
             "plan": PLAN_LABELS.get(s["plan"], s["plan"]) if s else "",
             "expires": ts_to_jalali_str(s["expires_at"]) if s else "",
             "days_left": _days_left(s["expires_at"], now) if s else "",
+            "util_plan": PLAN_LABELS.get(u["plan"], u["plan"]) if u else "",
+            "util_expires": ts_to_jalali_str(u["expires_at"]) if u else "",
+            "util_days": _days_left(u["expires_at"], now) if u else "",
             "approved": "بله" if is_appr else "خیر",
             "status": status,
             "full_name": tr.get("full_name") or "",
@@ -205,9 +221,10 @@ def collect_rows(now: float = None) -> list:
             "paid_total": (pay["total"] or 0) // 10 if pay else "",
             "note": inf.get("note") or "",
             "_expires_at": s["expires_at"] if s else None,
+            "_util_expires_at": u["expires_at"] if u else None,
         })
     order = {"فعال": 0, "رایگان دائمی": 1, "منقضی": 2, "بدون اشتراک": 3}
-    rows.sort(key=lambda r: (order[r["status"]], r["_expires_at"] or 0))
+    rows.sort(key=lambda r: (order[r["status"]], r["_expires_at"] or r["_util_expires_at"] or 0))
     return rows
 
 
@@ -244,14 +261,14 @@ def export_xlsx(path: str, now: float = None) -> int:
                 ws.cell(rr, IDX[k] + 1).fill = grey
     # ستون‌های متنی (تا اکسل «۱۴۰۵/۰۸/۱۵» یا کدها را عدد/تاریخ نکند)
     max_row = max(ws.max_row, 500)
-    for key in ("office_code", "expires", "last_payment", "national_id"):
+    for key in ("office_code", "expires", "util_expires", "last_payment", "national_id"):
         col = IDX[key] + 1
         for rr in range(2, max_row + 1):
             ws.cell(rr, col).number_format = "@"
     for rr in range(2, max_row + 1):
         ws.cell(rr, IDX["paid_total"] + 1).number_format = "#,##0"
-    widths = {"user_id": 14, "office_name": 30, "office_code": 11, "plan": 11, "expires": 15,
-              "days_left": 12, "approved": 13, "status": 13, "full_name": 20, "username": 16,
+    widths = {"user_id": 14, "office_name": 30, "office_code": 11, "plan": 13, "expires": 17,
+              "days_left": 14, "util_plan": 13, "util_expires": 17, "util_days": 14, "approved": 13, "status": 13, "full_name": 20, "username": 16,
               "national_id": 13, "last_payment": 14, "paid_total": 16, "note": 30}
     for k, w in widths.items():
         ws.column_dimensions[ws.cell(1, IDX[k] + 1).column_letter].width = w
@@ -265,6 +282,7 @@ def export_xlsx(path: str, now: float = None) -> int:
     ws.add_data_validation(dv_plan)
     ws.add_data_validation(dv_yes)
     dv_plan.add(col_range("plan"))
+    dv_plan.add(col_range("util_plan"))
     dv_yes.add(col_range("approved"))
 
     info = wb.create_sheet("راهنما")
@@ -273,8 +291,10 @@ def export_xlsx(path: str, now: float = None) -> int:
         "راهنمای اکسل اشتراک‌ها",
         f"تهیه‌شده در {ts_to_jalali_str(now or time.time())} — ستون‌های سرمه‌ای قابل ویرایش و ستون‌های خاکستری فقط برای اطلاع هستند.",
         "",
-        "افزودن اشتراک دستی: یک ردیف جدید با «آیدی عددی بله» بسازید و «تاریخ پایان (شمسی)» (مثل 1405/08/15) "
-        "یا «روزهای باقی‌مانده» (مثل 30) را وارد کنید. نوع اشتراک اگر خالی باشد «دستی» ثبت می‌شود.",
+        "دو اشتراک جدا وجود دارد: «ارزش منطقه‌ای» و «خدمات کاربردی» (خسارت و مهریه، هزینه دادرسی، تمبر، "
+        "ابزار فایل)؛ هر کدام سه ستون نوع / تاریخ پایان / روزهای باقی‌مانده دارد.",
+        "افزودن اشتراک دستی: یک ردیف جدید با «آیدی عددی بله» بسازید و در ستون‌های همان اشتراک، تاریخ پایان "
+        "(مثل 1405/08/15) یا روزهای باقی‌مانده (مثل 30) را وارد کنید. نوع اشتراک اگر خالی باشد «دستی» ثبت می‌شود.",
         "تمدید یا اصلاح: تاریخ پایان را عوض کنید، یا فقط عدد «روزهای باقی‌مانده» را تغییر دهید "
         "(از امروز حساب می‌شود). اگر هر دو را تغییر دهید، تاریخ پایان ملاک است.",
         "لغو اشتراک: تاریخ پایان را امروز یا گذشته بگذارید، یا روزهای باقی‌مانده را 0 کنید. "
@@ -324,11 +344,65 @@ def _cell_str(v) -> str:
     return _to_en(v).strip() if not isinstance(v, str) else v.strip()
 
 
+def _parse_sub(vals: dict, cur, pc: dict, exported_at: float, now: float):
+    """
+    ستون‌های یک اشتراک از یک ردیف. خروجی: (تغییر یا None، خطا یا None، متن‌های تغییر)
+    تغییر: {"set_expiry": ts|None, "plan": str|None, "notify": bool}
+    """
+    title = pc["title"]
+    plan_raw = _cell_str(vals[pc["plan"]])
+    plan = None
+    if plan_raw:
+        plan = _LABEL_TO_PLAN.get(plan_raw)
+        if not plan:
+            return None, f"نوع {title} باید ماهانه، سالانه یا دستی باشد.", []
+    exp_raw = vals[pc["expires"]]
+    exp_s = _cell_str(exp_raw) if not isinstance(exp_raw, (datetime.date, datetime.datetime)) else "x"
+    days_s = _cell_str(vals[pc["days"]])
+    cur_ts = cur[pc["ts"]] if cur else None
+    cur_exp = cur[pc["expires"]] if cur else ""
+    cur_plan = cur[pc["plan"]] if cur else ""
+    new_exp, exp_changed = None, False
+    if exp_s:
+        ymd = parse_jalali(exp_raw)
+        if not ymd:
+            return None, f"تاریخ پایان {title} نامعتبر است ({_cell_str(exp_raw)}) — قالب درست: 1405/08/15", []
+        if f"{ymd[0]:04d}/{ymd[1]:02d}/{ymd[2]:02d}" != cur_exp:
+            new_exp, exp_changed = jalali_end_of_day_ts(*ymd), True
+    if not exp_changed and days_s != "":
+        try:
+            days = int(float(days_s))
+        except ValueError:
+            return None, f"روزهای باقی‌مانده {title} باید عدد باشد.", []
+        if days < 0:
+            return None, f"روزهای باقی‌مانده {title} نمی‌تواند منفی باشد.", []
+        exported_days = _days_left(cur_ts, exported_at) if cur_ts is not None else None
+        if exported_days is None or days != exported_days:
+            new_exp = end_of_day_after(days, now)
+    has_sub = cur_ts is not None
+    if new_exp is not None:
+        plan = plan or (_LABEL_TO_PLAN.get(cur_plan) if has_sub else None) or "manual"
+        if new_exp <= now:
+            note = f"{title}: لغو / پایان" + (f" (قبلاً تا {cur_exp})" if has_sub else "")
+            notify = False
+        else:
+            note = (f"{title} ({PLAN_LABELS[plan]}): " + (f"{cur_exp} ← " if has_sub else "جدید تا ")
+                    + ts_to_jalali_str(new_exp))
+            notify = cur_ts is None or new_exp > max(cur_ts, now)
+        return {"set_expiry": new_exp, "plan": plan, "notify": notify}, None, [note]
+    if plan and has_sub and PLAN_LABELS.get(plan) != cur_plan:
+        return ({"set_expiry": None, "plan": plan, "notify": False}, None,
+                [f"نوع {title}: {cur_plan or '—'} ← {PLAN_LABELS[plan]}"])
+    if plan and not has_sub:
+        return None, f"برای {title} تاریخ پایان یا روزهای باقی‌مانده را وارد کنید.", []
+    return None, None, []
+
+
 def parse_xlsx(path: str, now: float = None) -> dict:
     """
     خروجی: {"ok", "errors", "actions", "summary", "changes": [متن هر تغییر]}
-    actions: [{"user_id", "set_expiry": ts|None, "plan": str|None, "approve": True/False/None,
-               "office_name", "office_code", "note" (None = بدون تغییر), "notify": bool}]
+    actions: [{"user_id", "subs": {"rv"|"util": {"set_expiry", "plan", "notify"}},
+               "approve": True/False/None, "office_name", "office_code", "note" (None = بدون تغییر)}]
     """
     from openpyxl import load_workbook
 
@@ -368,8 +442,8 @@ def parse_xlsx(path: str, now: float = None) -> dict:
             continue
         seen.add(uid)
         cur = current.get(uid)
-        act = {"user_id": uid, "set_expiry": None, "plan": None, "approve": None,
-               "office_name": None, "office_code": None, "note": None, "notify": False}
+        act = {"user_id": uid, "subs": {}, "approve": None,
+               "office_name": None, "office_code": None, "note": None}
         notes = []
 
         # ── مشخصات دفتر و توضیحات ──
@@ -395,62 +469,21 @@ def parse_xlsx(path: str, now: float = None) -> dict:
                 act["approve"] = want
                 notes.append("دسترسی رایگان دائمی: " + ("فعال" if want else "لغو"))
 
-        # ── نوع اشتراک ──
-        plan_raw = _cell_str(vals["plan"])
-        plan = None
-        if plan_raw:
-            plan = _LABEL_TO_PLAN.get(plan_raw)
-            if not plan:
-                errors.append(f"ردیف {i}: نوع اشتراک باید ماهانه، سالانه یا دستی باشد.")
-                continue
-
-        # ── تاریخ پایان / روزهای باقی‌مانده ──
-        exp_raw = vals["expires"]
-        exp_s = _cell_str(exp_raw) if not isinstance(exp_raw, (datetime.date, datetime.datetime)) else "x"
-        days_s = _cell_str(vals["days_left"])
-        new_exp = None
-        exp_changed = False
-        if exp_s:
-            ymd = parse_jalali(exp_raw)
-            if not ymd:
-                errors.append(f"ردیف {i}: تاریخ پایان نامعتبر است ({_cell_str(exp_raw)}) — قالب درست: 1405/08/15")
-                continue
-            exp_str = f"{ymd[0]:04d}/{ymd[1]:02d}/{ymd[2]:02d}"
-            if not cur or exp_str != cur["expires"]:
-                new_exp, exp_changed = jalali_end_of_day_ts(*ymd), True
-        if not exp_changed and days_s != "":
-            try:
-                days = int(float(days_s))
-            except ValueError:
-                errors.append(f"ردیف {i}: روزهای باقی‌مانده باید عدد باشد.")
-                continue
-            if days < 0:
-                errors.append(f"ردیف {i}: روزهای باقی‌مانده نمی‌تواند منفی باشد.")
-                continue
-            exported_days = (_days_left(cur["_expires_at"], exported_at)
-                             if cur and cur["_expires_at"] is not None else None)
-            if exported_days is None or days != exported_days:
-                new_exp = end_of_day_after(days, now)
-        has_sub = bool(cur and cur["_expires_at"] is not None)
-        if new_exp is not None:
-            act["set_expiry"] = new_exp
-            act["plan"] = plan or (_LABEL_TO_PLAN.get(cur["plan"]) if has_sub else None) or "manual"
-            old_exp = cur["_expires_at"] if has_sub else None
-            if new_exp <= now:
-                notes.append("اشتراک: لغو / پایان" + (f" (قبلاً تا {cur['expires']})" if has_sub else ""))
-            else:
-                notes.append(f"اشتراک ({PLAN_LABELS[act['plan']]}): "
-                             + (f"{cur['expires']} ← " if has_sub else "جدید تا ")
-                             + ts_to_jalali_str(new_exp))
-                act["notify"] = old_exp is None or new_exp > max(old_exp, now)
-        elif plan and has_sub and PLAN_LABELS.get(plan) != cur["plan"]:
-            act["plan"] = plan
-            notes.append(f"نوع اشتراک: {cur['plan'] or '—'} ← {PLAN_LABELS[plan]}")
-        elif plan and not has_sub:
-            errors.append(f"ردیف {i}: برای آیدی {uid} تاریخ پایان یا روزهای باقی‌مانده را وارد کنید.")
+        # ── اشتراک‌ها (ارزش منطقه‌ای و خدمات کاربردی) ──
+        bad = False
+        for product, pc in PRODUCT_COLS.items():
+            sub, err, sub_notes = _parse_sub(vals, cur, pc, exported_at, now)
+            if err:
+                errors.append(f"ردیف {i}: {err}")
+                bad = True
+                break
+            if sub:
+                act["subs"][product] = sub
+                notes += sub_notes
+        if bad:
             continue
 
-        if not cur and act["set_expiry"] is None and act["approve"] is None \
+        if not cur and not act["subs"] and act["approve"] is None \
                 and all(act[k] is None for k in ("office_name", "office_code", "note")):
             errors.append(f"ردیف {i}: برای آیدی جدید {uid} هیچ اطلاعاتی وارد نشده است.")
             continue
@@ -468,7 +501,7 @@ def parse_xlsx(path: str, now: float = None) -> dict:
 
 
 async def apply_actions(actions: list) -> list:
-    """اعمال تغییرات؛ خروجی: [(user_id, expires_at)] کاربرانی که باید از تمدید/فعال‌سازی مطلع شوند."""
+    """اعمال تغییرات؛ خروجی: [(user_id, expires_at, plan, product)] کاربرانی که باید مطلع شوند."""
     import access_control
     notify = []
     for a in actions:
@@ -479,11 +512,15 @@ async def apply_actions(actions: list) -> list:
             await access_control.approve_user(uid)
         elif a["approve"] is False:
             await access_control.revoke_user(uid)
-        if a["set_expiry"] is not None:
-            await access_control.set_subscription_expiry(uid, a["plan"] or "manual", a["set_expiry"])
-            if a["notify"]:
-                notify.append((uid, a["set_expiry"], a["plan"] or "manual"))
-        elif a["plan"]:
-            db.execute("UPDATE subscriptions SET plan=?, updated_at=? WHERE user_id=?", (a["plan"], time.time(), uid))
+        for product, sub in (a.get("subs") or {}).items():
+            table = access_control.PRODUCT_TABLES[product]
+            if sub["set_expiry"] is not None:
+                await access_control.set_subscription_expiry(uid, sub["plan"] or "manual", sub["set_expiry"],
+                                                              product=product)
+                if sub["notify"]:
+                    notify.append((uid, sub["set_expiry"], sub["plan"] or "manual", product))
+            elif sub["plan"]:
+                db.execute(f"UPDATE {table} SET plan=?, updated_at=? WHERE user_id=?",
+                           (sub["plan"], time.time(), uid))
     refresh_file()
     return notify

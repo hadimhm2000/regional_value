@@ -75,33 +75,44 @@ async def consume_free_retry(user_id: int) -> bool:
 # ══════════════════════════════════════════════════════════════════
 # اشتراک شخصی (ماهانه/سالانه)
 # ══════════════════════════════════════════════════════════════════
-def _own_subscription(user_id: int):
-    r = db.query_one("SELECT plan, expires_at, updated_at FROM subscriptions WHERE user_id=? AND expires_at > ?",
+# دو محصول جدا با اشتراک جدا:
+#   "rv"   — استعلام ارزش منطقه‌ای (جدول subscriptions)
+#   "util" — خدمات کاربردی: خسارت/مهریه، هزینه دادرسی، تمبر، ابزار فایل (جدول util_subscriptions)
+PRODUCT_TABLES = {"rv": "subscriptions", "util": "util_subscriptions"}
+PRODUCT_TITLES = {"rv": "استعلام ارزش منطقه‌ای", "util": "خدمات کاربردی"}
+
+
+def _table(product: str) -> str:
+    return PRODUCT_TABLES[product]
+
+
+def _own_subscription(user_id: int, product: str = "rv"):
+    r = db.query_one(f"SELECT plan, expires_at, updated_at FROM {_table(product)} WHERE user_id=? AND expires_at > ?",
                      (int(user_id), time.time()))
     return dict(r) if r else None
 
 
-async def get_own_subscription(user_id: int):
-    """فقط اشتراکی که خود کاربر خریده (نه اشتراک دفتر)."""
-    return _own_subscription(user_id)
+async def get_own_subscription(user_id: int, product: str = "rv"):
+    return _own_subscription(user_id, product)
 
 
-async def get_subscription(user_id: int):
-    """اشتراک فعال کاربر یا None."""
-    return _own_subscription(user_id)
+async def get_subscription(user_id: int, product: str = "rv"):
+    """اشتراک فعال کاربر برای یک محصول یا None."""
+    return _own_subscription(user_id, product)
 
 
-async def activate_subscription(user_id: int, plan: str, days: int) -> dict:
+async def activate_subscription(user_id: int, plan: str, days: int, product: str = "rv") -> dict:
     """فعال‌سازی/تمدید؛ اگر هنوز فعال است، از تاریخ انقضای فعلی تمدید می‌شود."""
     now = time.time()
+    t = _table(product)
     with db.tx() as c:
-        r = c.execute("SELECT expires_at FROM subscriptions WHERE user_id=?", (int(user_id),)).fetchone()
+        r = c.execute(f"SELECT expires_at FROM {t} WHERE user_id=?", (int(user_id),)).fetchone()
         start = max(now, r["expires_at"] if r else 0)
         expires = start + days * 86400
-        c.execute("INSERT INTO subscriptions(user_id, plan, expires_at, updated_at) VALUES (?,?,?,?) "
+        c.execute(f"INSERT INTO {t}(user_id, plan, expires_at, updated_at) VALUES (?,?,?,?) "
                   "ON CONFLICT(user_id) DO UPDATE SET plan=excluded.plan, expires_at=excluded.expires_at, "
                   "updated_at=excluded.updated_at", (int(user_id), plan, expires, now))
-    logger.info(f"[ACCESS] اشتراک {plan} ({days} روز) برای کاربر {user_id} فعال شد")
+    logger.info(f"[ACCESS] اشتراک {product}/{plan} ({days} روز) برای کاربر {user_id} فعال شد")
     refresh_subs_excel()
     return {"plan": plan, "expires_at": expires, "updated_at": now}
 
@@ -115,24 +126,59 @@ def refresh_subs_excel() -> None:
         logger.warning(f"[ACCESS] به‌روزرسانی فایل اکسل اشتراک‌ها ناموفق: {e}")
 
 
-async def list_subscriptions() -> dict:
+async def list_subscriptions(product: str = "rv") -> dict:
     return {str(r["user_id"]): dict(r) for r in
-            db.query("SELECT user_id, plan, expires_at, updated_at FROM subscriptions")}
+            db.query(f"SELECT user_id, plan, expires_at, updated_at FROM {_table(product)}")}
 
 
-async def set_subscription_expiry(user_id: int, plan: str, expires_at: float) -> None:
+async def set_subscription_expiry(user_id: int, plan: str, expires_at: float, product: str = "rv") -> None:
     """تنظیم مستقیم تاریخ پایان اشتراک (ثبت/ویرایش دستی ادمین از اکسل)."""
-    db.execute("INSERT INTO subscriptions(user_id, plan, expires_at, updated_at) VALUES (?,?,?,?) "
+    db.execute(f"INSERT INTO {_table(product)}(user_id, plan, expires_at, updated_at) VALUES (?,?,?,?) "
                "ON CONFLICT(user_id) DO UPDATE SET plan=excluded.plan, expires_at=excluded.expires_at, "
                "updated_at=excluded.updated_at", (int(user_id), plan, float(expires_at), time.time()))
-    logger.info(f"[ACCESS] تاریخ پایان اشتراک کاربر {user_id} دستی تنظیم شد ({plan})")
+    logger.info(f"[ACCESS] تاریخ پایان اشتراک {product} کاربر {user_id} دستی تنظیم شد ({plan})")
 
 
 PLAN_TITLES = {"monthly": "اشتراک ماهانه", "yearly": "اشتراک سالانه", "manual": "اشتراک دستی (ادمین)"}
 
 
-def plan_title(plan: str) -> str:
-    return PLAN_TITLES.get(plan or "", plan or "اشتراک")
+def plan_title(plan: str, product: str = "rv") -> str:
+    title = PLAN_TITLES.get(plan or "", plan or "اشتراک")
+    return f"{title} {PRODUCT_TITLES[product]}"
+
+
+# ══════════════════════════════════════════════════════════════════
+# خدمات کاربردی: اعتبار رایگان هر بخش (config.UTIL_FREE_PER_TOOL) و سپس اشتراک
+# ══════════════════════════════════════════════════════════════════
+def util_used(user_id: int, tool: str) -> int:
+    r = db.query_one("SELECT count FROM util_usage WHERE user_id=? AND tool=?", (int(user_id), tool))
+    return int(r["count"]) if r else 0
+
+
+def util_free_left(user_id: int, tool: str) -> int:
+    from config import UTIL_FREE_PER_TOOL
+    return max(0, UTIL_FREE_PER_TOOL - util_used(user_id, tool))
+
+
+async def util_access(user_id: int, tool: str) -> str:
+    """
+    وضعیت دسترسی به یک بخش خدمات کاربردی:
+      "free_user" (تاییدشدهٔ ادمین) | "subscribed" | "free_credit" | "none"
+    """
+    if await is_approved(user_id):
+        return "free_user"
+    if _own_subscription(user_id, "util"):
+        return "subscribed"
+    if util_free_left(user_id, tool) > 0:
+        return "free_credit"
+    return "none"
+
+
+def record_util_use(user_id: int, tool: str) -> None:
+    """ثبت یک استفادهٔ کامل (برای مشترکان هم ثبت می‌شود؛ برای آمار)."""
+    db.execute("INSERT INTO util_usage(user_id, tool, count, last_at) VALUES (?,?,1,?) "
+               "ON CONFLICT(user_id, tool) DO UPDATE SET count=count+1, last_at=excluded.last_at",
+               (int(user_id), tool, time.time()))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -168,7 +214,7 @@ def record_payment(user_id: int, plan: str, amount_rial: int, charge_id: str = "
 
 
 # ── یادآوری تمدید ──
-def due_renew_reminders(soon_days: int, now: float | None = None) -> list:
+def due_renew_reminders(soon_days: int, now: float | None = None, product: str = "rv") -> list:
     """
     اشتراک‌هایی که باید برایشان یادآوری ارسال شود:
       kind="soon": کمتر از soon_days روز مانده و برای همین تاریخ انقضا هنوز یادآوری نشده
@@ -176,19 +222,20 @@ def due_renew_reminders(soon_days: int, now: float | None = None) -> list:
     """
     now = now or time.time()
     soon = db.query(
-        "SELECT user_id, plan, expires_at FROM subscriptions WHERE expires_at > ? AND expires_at <= ? "
+        f"SELECT user_id, plan, expires_at FROM {_table(product)} WHERE expires_at > ? AND expires_at <= ? "
         "AND (reminded_soon IS NULL OR reminded_soon != expires_at)",
         (now, now + soon_days * 86400))
     ended = db.query(
-        "SELECT user_id, plan, expires_at FROM subscriptions WHERE expires_at <= ? AND expires_at > ? "
+        f"SELECT user_id, plan, expires_at FROM {_table(product)} WHERE expires_at <= ? AND expires_at > ? "
         "AND (reminded_end IS NULL OR reminded_end != expires_at)",
         (now, now - 7 * 86400))
-    return ([{**dict(r), "kind": "soon"} for r in soon] + [{**dict(r), "kind": "end"} for r in ended])
+    return ([{**dict(r), "kind": "soon", "product": product} for r in soon]
+            + [{**dict(r), "kind": "end", "product": product} for r in ended])
 
 
-def mark_reminded(user_id: int, kind: str, expires_at: float) -> None:
+def mark_reminded(user_id: int, kind: str, expires_at: float, product: str = "rv") -> None:
     col = "reminded_soon" if kind == "soon" else "reminded_end"
-    db.execute(f"UPDATE subscriptions SET {col}=? WHERE user_id=?", (expires_at, int(user_id)))
+    db.execute(f"UPDATE {_table(product)} SET {col}=? WHERE user_id=?", (expires_at, int(user_id)))
 
 
 # ══════════════════════════════════════════════════════════════════

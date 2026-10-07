@@ -101,6 +101,37 @@ async def _send_document_once(
         return False
 
 
+async def send_photo_direct(chat_id: int, file_path: str, caption: str = None, reply_markup=None) -> bool:
+    """ارسال تصویر (نمایش به‌صورت عکس، نه فایل ضمیمه) با multipart/form-data مستقیم."""
+    if not os.path.exists(file_path):
+        logger.error(f"[BALE-FILE] فایل وجود ندارد: {file_path}")
+        return False
+    url = _api_url("sendPhoto")
+    try:
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+        async with aiohttp.ClientSession() as session:
+            data = aiohttp.FormData()
+            data.add_field("chat_id", str(chat_id))
+            if caption:
+                data.add_field("caption", caption)
+            rm_json = _serialize_reply_markup(reply_markup)
+            if rm_json:
+                data.add_field("reply_markup", rm_json)
+            data.add_field("photo", file_bytes, filename=os.path.basename(file_path), content_type="image/jpeg")
+            async with session.post(
+                url, data=data, timeout=aiohttp.ClientTimeout(total=60), ssl=False
+            ) as resp:
+                result = await resp.json()
+                if result.get("ok"):
+                    return True
+                logger.error(f"[BALE-FILE] خطای API عکس: {result.get('description', 'unknown')}")
+                return False
+    except Exception as e:
+        logger.error(f"[BALE-FILE] خطا در ارسال عکس: {e}")
+        return False
+
+
 async def send_invoice(
     chat_id: int,
     title: str,

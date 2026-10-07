@@ -68,7 +68,8 @@ from tax_geolocation_query import get_province_list, find_land_use_value, extrac
 import access_control
 import db
 import history
-from payment import send_subscription_invoice, parse_payload, INVOICE_PAYLOAD_TYPE
+from payment import (send_subscription_invoice, parse_payload, INVOICE_PAYLOAD_TYPE, PAYLOAD_PRODUCT,
+                     PRODUCT_PLANS)
 from bale_file_sender import send_document_direct
 from keyboards import after_result_kb, is_back, is_restart, main_menu_kb, nav_only_kb, nav_row
 
@@ -1939,8 +1940,9 @@ async def process_plan(message: Message, state: FSMContext, bot: Bot):
 @regional_value_router.pre_checkout_query()
 async def rv_pre_checkout(pre_checkout_query: PreCheckoutQuery, bot: Bot):
     payload = parse_payload(getattr(pre_checkout_query, "invoice_payload", ""))
-    plan = SUBSCRIPTION_PLANS.get(payload.get("plan"))
-    ok = payload.get("type") == INVOICE_PAYLOAD_TYPE and plan is not None \
+    product = PAYLOAD_PRODUCT.get(payload.get("type"))
+    plan = PRODUCT_PLANS[product].get(payload.get("plan")) if product else None
+    ok = plan is not None \
         and getattr(pre_checkout_query, "total_amount", plan["rial"] if plan else 0) == (plan or {}).get("rial")
     try:
         if ok:
@@ -1962,6 +1964,10 @@ async def rv_successful_payment(message: Message, state: FSMContext, bot: Bot):
     user_id = message.from_user.id
     sp = message.successful_payment
     payload = parse_payload(getattr(sp, "invoice_payload", ""))
+    if PAYLOAD_PRODUCT.get(payload.get("type")) == "util":
+        from utilities_handlers import on_util_payment
+        await on_util_payment(message, state, bot, payload)
+        return
     plan_key = payload.get("plan") if payload.get("type") == INVOICE_PAYLOAD_TYPE else None
     plan_key = plan_key or (await state.get_data()).get("rv_plan")
     logger.info(f"[RV-PAYMENT] پرداخت موفق از کاربر {user_id} — پلن={plan_key}")

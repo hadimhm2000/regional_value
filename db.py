@@ -5,6 +5,7 @@ db.py — پایگاه دادهٔ SQLite مرکزی ربات.
 جایگزین فایل‌های JSON قبلی (approved_users / free_retries / subscriptions /
 trial_requests) و محل ذخیرهٔ:
   • سابقهٔ استعلام‌ها (با کد رهگیری یکتا، برای دریافت دوبارهٔ PDF و تأیید اصالت)
+  • اشتراک و اعتبار رایگان «خدمات کاربردی» (جدا از اشتراک ارزش منطقه‌ای)
   • نام و کد دفتر خدمات قضایی هر مشترک (ثبت ادمین؛ قابل ویرایش با اکسل اشتراک‌ها)
   • پرداخت‌ها و رویدادها (برای /stats)
   • وضعیت FSM کاربران (ری‌استارت ربات فرم نیمه‌کارهٔ کسی را پاک نمی‌کند)
@@ -46,6 +47,21 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     updated_at      REAL NOT NULL,
     reminded_soon   REAL,           -- expires_at ای که یادآوری «نزدیک پایان» برایش ارسال شد
     reminded_end    REAL            -- expires_at ای که پیام «پایان اشتراک» برایش ارسال شد
+);
+CREATE TABLE IF NOT EXISTS util_subscriptions (   -- اشتراک «خدمات کاربردی» (جدا از ارزش منطقه‌ای)
+    user_id         INTEGER PRIMARY KEY,
+    plan            TEXT NOT NULL,
+    expires_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL,
+    reminded_soon   REAL,
+    reminded_end    REAL
+);
+CREATE TABLE IF NOT EXISTS util_usage (            -- تعداد استفادهٔ هر کاربر از هر بخش خدمات کاربردی
+    user_id     INTEGER NOT NULL,
+    tool        TEXT NOT NULL,      -- damages | court_fee | stamp | file_tools
+    count       INTEGER NOT NULL DEFAULT 0,
+    last_at     REAL,
+    PRIMARY KEY (user_id, tool)
 );
 CREATE TABLE IF NOT EXISTS trial_requests (
     user_id     INTEGER PRIMARY KEY,
