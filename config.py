@@ -62,8 +62,31 @@ EXECUTOR_MAX_WORKERS = int(os.environ.get("EXECUTOR_MAX_WORKERS", "20"))
 # مسیر فایل‌های ذخیرهٔ داده (لیست تاییدشده‌ها و اعتبار استعلام رایگان)
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
+# پایگاه دادهٔ SQLite (کاربران، اشتراک‌ها، سابقهٔ استعلام، دفترها، آمار، وضعیت فرم‌ها)
+DB_PATH = os.environ.get("DB_PATH", os.path.join(DATA_DIR, "bot.sqlite3"))
+
+# فایل‌های JSON نسخه‌های قبلی — فقط برای انتقال خودکار به SQLite در اولین اجرا
 APPROVED_USERS_FILE = os.path.join(DATA_DIR, "approved_users.json")
 # اعتبار استعلام رایگان (استعلام‌های تست + جبران خطای سیستمی)
 FREE_RETRY_FILE = os.path.join(DATA_DIR, "free_retries.json")
 SUBSCRIPTIONS_FILE = os.path.join(DATA_DIR, "subscriptions.json")
 TRIAL_REQUESTS_FILE = os.path.join(DATA_DIR, "trial_requests.json")
+
+# نام کاربری ربات در بله (بدون @) — برای لینک QR تأیید اصالت و لینک دعوت همکار
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "Regionalvalue_bot").lstrip("@")
+
+# ═══ اشتراک دفتری ═══
+# حداکثر تعداد همکارانی که مدیر دفتر می‌تواند به اشتراک خود اضافه کند (بدون احتساب خود مدیر)
+OFFICE_MAX_MEMBERS = int(os.environ.get("OFFICE_MAX_MEMBERS", "3"))
+
+# ═══ یادآوری تمدید ═══
+# چند روز قبل از پایان اشتراک یادآوری ارسال شود
+RENEW_REMIND_DAYS = int(os.environ.get("RENEW_REMIND_DAYS", "3"))
+# فاصلهٔ بررسی اشتراک‌های رو به پایان (ثانیه)
+RENEW_CHECK_INTERVAL = int(os.environ.get("RENEW_CHECK_INTERVAL", "3600"))
+
+# ═══ سابقهٔ استعلام ═══
+# تعداد استعلام‌های اخیر که در «سوابق استعلام» نمایش داده می‌شود
+HISTORY_PAGE_SIZE = int(os.environ.get("HISTORY_PAGE_SIZE", "10"))
+# حداکثر تعداد ملک در یک گزارش تجمیعی
+BATCH_MAX_ITEMS = int(os.environ.get("BATCH_MAX_ITEMS", "15"))

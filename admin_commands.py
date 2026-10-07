@@ -8,6 +8,9 @@ admin_commands.py — دستورهای مدیریتی، فقط برای ADMIN_ID
 /subs                   — نمایش مشترکان فعال
 /addsub <آیدی> <monthly|yearly> — فعال‌سازی/تمدید دستی اشتراک
 /credit <آیدی> <تعداد>  — افزودن استعلام رایگان
+/stats                  — آمار استفاده، قیف تبدیل، فروش و خطاها
+/rates                  — دریافت اکسل نرخ اعیانی فعلی؛ ارسال اکسل ویرایش‌شده = به‌روزرسانی (با تایید)
+/rates_rollback         — بازگرداندن نسخهٔ قبلی نرخ‌ها
 دکمه‌های «✅ تایید / ❌ رد» زیر پیام درخواست تست — تایید = ۲ استعلام رایگان
 """
 import logging
@@ -17,7 +20,7 @@ from aiogram.filters import Command
 import time
 
 from aiogram import F
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import ADMIN_ID, SUBSCRIPTION_PLANS, TRIAL_CREDITS
 import access_control
@@ -188,3 +191,229 @@ async def cmd_credit(message: Message):
     user_id, n = int(parts[1]), int(parts[2])
     await access_control.grant_free_retry(user_id, n)
     await message.answer(f"✅ {n} استعلام رایگان برای کاربر {user_id} ثبت شد.")
+
+
+# ══════════════════════════════════════════════════════════════════
+# /stats — آمار استفاده، قیف تبدیل و درآمد
+# ══════════════════════════════════════════════════════════════════
+def _fa(n) -> str:
+    return str(n).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+
+
+def _tehran_midnight_ts() -> float:
+    import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.datetime.now(ZoneInfo("Asia/Tehran"))
+    except Exception:
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=3, minutes=30)))
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def build_stats_text(now: float = None) -> str:
+    import db
+    now = now or time.time()
+    periods = [("امروز", _tehran_midnight_ts()), ("۷ روز", now - 7 * 86400), ("۳۰ روز", now - 30 * 86400)]
+
+    def ev(kind):
+        return [db.query_one("SELECT COUNT(*) n FROM events WHERE kind=? AND created_at>=?", (kind, t))["n"]
+                for _, t in periods]
+
+    def ev_users(kind):
+        return [db.query_one("SELECT COUNT(DISTINCT user_id) n FROM events WHERE kind=? AND created_at>=?",
+                             (kind, t))["n"] for _, t in periods]
+
+    def row(title, vals):
+        return f"{title}: " + " | ".join(_fa(f"{v:,}") for v in vals)
+
+    starts, confirms, ok = ev("form_start"), ev("preview_confirm"), ev("query_ok")
+    no_res = [a + b + c for a, b, c in zip(ev("no_result"), ev("no_value"), ev("land_use_missing"))]
+    pays = [db.query_one("SELECT COUNT(*) n, COALESCE(SUM(amount_rial),0) s FROM payments WHERE created_at>=?",
+                         (t,)) for _, t in periods]
+    trials = [db.query_one("SELECT COUNT(*) n FROM trial_requests WHERE created_at>=?", (t,))["n"]
+              for _, t in periods]
+
+    lines = ["📊 *آمار ربات*", "ستون‌ها: " + " | ".join(p for p, _ in periods), "",
+             "— استفاده —",
+             row("🟢 کاربران فعال (استعلام موفق)", ev_users("query_ok")),
+             row("📝 شروع فرم", starts),
+             row("👁 تایید پیش‌نمایش", confirms),
+             row("✅ استعلام موفق", ok),
+             row("⚠️ بدون نتیجه (آدرس/منطقه)", no_res),
+             row("🛑 خطای سیستمی", ev("query_fail")),
+             row("📄 دریافت دوبارهٔ PDF", ev("pdf_resend")),
+             row("📑 گزارش تجمیعی", ev("batch_pdf")),
+             row("🔎 بررسی اصالت", ev("verify")),
+             "", "— قیف (۳۰ روز) —"]
+    s30, c30, o30 = starts[2], confirms[2], ok[2]
+    if s30:
+        lines.append(f"شروع فرم ← تایید پیش‌نمایش: {_fa(round(100 * c30 / s30))}٪")
+    if c30:
+        lines.append(f"تایید پیش‌نمایش ← استعلام موفق: {_fa(round(100 * o30 / c30))}٪")
+    lines += ["", "— فروش —",
+              row("🧪 درخواست تست", trials),
+              row("💳 پرداخت", [p["n"] for p in pays]),
+              row("💰 درآمد (تومان)", [p["s"] // 10 for p in pays])]
+
+    pending_trials = db.query_one("SELECT COUNT(*) n FROM trial_requests WHERE status='pending'")["n"]
+    active_subs = db.query_one("SELECT COUNT(*) n FROM subscriptions WHERE expires_at>?", (now,))["n"]
+    expiring = db.query_one("SELECT COUNT(*) n FROM subscriptions WHERE expires_at>? AND expires_at<=?",
+                            (now, now + 7 * 86400))["n"]
+    lines += ["", "— وضعیت فعلی —",
+              f"💳 مشترکان فعال: {_fa(active_subs)} (پایان در ۷ روز آینده: {_fa(expiring)})",
+              f"👥 اعضای اشتراک دفتری: {_fa(db.query_one('SELECT COUNT(*) n FROM office_members')['n'])}",
+              f"✅ کاربران رایگانِ ادمین: {_fa(db.query_one('SELECT COUNT(*) n FROM approved_users')['n'])}",
+              f"⏳ درخواست تست در انتظار: {_fa(pending_trials)}",
+              f"📂 کل استعلام‌های ثبت‌شده: {_fa(db.query_one('SELECT COUNT(*) n FROM queries')['n'])}"]
+
+    top = db.query("SELECT province, COUNT(*) n FROM queries WHERE created_at>=? GROUP BY province "
+                   "ORDER BY n DESC LIMIT 5", (now - 30 * 86400,))
+    if top:
+        lines += ["", "— پرکاربردترین استان‌ها (۳۰ روز) —"]
+        lines += [f"{_fa(i)}. {r['province']}: {_fa(r['n'])}" for i, r in enumerate(top, 1)]
+    fails = db.query("SELECT detail, created_at FROM events WHERE kind='query_fail' ORDER BY id DESC LIMIT 3")
+    if fails:
+        lines += ["", "— آخرین خطاهای سیستمی —"]
+        lines += [f"• {(r['detail'] or '-').splitlines()[0][:120]}" for r in fails]
+    return "\n".join(lines)
+
+
+@admin_router.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if not _is_admin(message):
+        return
+    try:
+        await message.answer(build_stats_text())
+    except Exception as e:
+        logger.error(f"[ADMIN] ساخت آمار ناموفق: {e}", exc_info=True)
+        await message.answer(f"⚠️ ساخت آمار ناموفق بود: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
+# /rates — به‌روزرسانی جدول نرخ اعیانی با اکسل (از داخل ربات)
+# ══════════════════════════════════════════════════════════════════
+def _pending_rates_path() -> str:
+    import os
+    from config import DATA_DIR
+    return os.path.join(DATA_DIR, "rates_pending.json")
+
+
+@admin_router.message(Command("rates"))
+async def cmd_rates(message: Message):
+    if not _is_admin(message):
+        return
+    import os
+    import tempfile
+    import rates_admin
+    from bale_file_sender import send_document_direct
+
+    path = os.path.join(tempfile.gettempdir(), f"ayani_rates_{time.time_ns()}.xlsx")
+    try:
+        rates_admin.export_xlsx(path)
+        await send_document_direct(
+            chat_id=message.chat.id, file_path=path, filename="نرخ_اعیانی.xlsx",
+            caption=("📊 جدول نرخ اعیانی فعلی\n\n" + rates_admin.describe_current() + "\n\n"
+                     "نرخ‌های جدید را در همین فایل وارد کنید (ساختار ستون‌ها تغییر نکند) و فایل را برای ربات "
+                     "بفرستید. قبل از اعمال، خلاصهٔ تغییرات برای تایید نمایش داده می‌شود.\n"
+                     "بازگرداندن نسخهٔ قبلی: /rates_rollback"),
+        )
+    except Exception as e:
+        logger.error(f"[ADMIN] ساخت اکسل نرخ‌ها ناموفق: {e}", exc_info=True)
+        await message.answer(f"⚠️ ساخت فایل اکسل ناموفق بود: {e}")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+@admin_router.message(F.document & F.document.file_name.lower().endswith(".xlsx")
+                      & (F.from_user.id == (ADMIN_ID or -1)))
+async def admin_rates_upload(message: Message):
+    import json
+    import os
+    import tempfile
+    import rates_admin
+
+    path = os.path.join(tempfile.gettempdir(), f"rates_upload_{time.time_ns()}.xlsx")
+    try:
+        await message.bot.download(message.document, destination=path)
+        res = rates_admin.parse_xlsx(path)
+    except Exception as e:
+        logger.error(f"[ADMIN] دریافت/خواندن اکسل نرخ‌ها ناموفق: {e}", exc_info=True)
+        await message.answer(f"⚠️ دریافت یا خواندن فایل ناموفق بود: {e}")
+        return
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    if not res["ok"]:
+        errs = res["errors"]
+        await message.answer("❌ فایل پذیرفته نشد:\n" + "\n".join(f"• {e}" for e in errs[:20])
+                             + (f"\n... و {len(errs) - 20} خطای دیگر" if len(errs) > 20 else ""))
+        return
+    if res["changed"] == 0 and not res["added"] and not res["removed"]:
+        await message.answer("ℹ️ این فایل با نرخ‌های فعلی یکسان است؛ تغییری برای اعمال وجود ندارد.")
+        return
+    with open(_pending_rates_path(), "w", encoding="utf-8") as f:
+        json.dump(res["rates"], f, ensure_ascii=False)
+    text = "📋 *پیش‌نمایش به‌روزرسانی نرخ اعیانی*\n\n" + res["summary"]
+    if res["warnings"]:
+        text += "\n\n⚠️ هشدارها:\n" + "\n".join(f"• {w}" for w in res["warnings"])
+    text += "\n\nبا «اعمال»، نسخهٔ فعلی پشتیبان‌گیری و نرخ‌های جدید بلافاصله فعال می‌شود."
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ اعمال", callback_data="rates_apply"),
+        InlineKeyboardButton(text="❌ انصراف", callback_data="rates_cancel"),
+    ]])
+    await message.answer(text, reply_markup=kb)
+
+
+@admin_router.callback_query(F.data.in_({"rates_apply", "rates_cancel"}))
+async def cb_rates_decision(callback: CallbackQuery):
+    if ADMIN_ID is None or callback.from_user.id != ADMIN_ID:
+        await callback.answer("دسترسی ندارید.")
+        return
+    import json
+    import os
+    import rates_admin
+
+    pending = _pending_rates_path()
+    if not os.path.exists(pending):
+        await callback.answer("درخواست فعالی وجود ندارد.")
+        return
+    if callback.data == "rates_cancel":
+        os.remove(pending)
+        await callback.answer("لغو شد.")
+        await callback.message.answer("❌ به‌روزرسانی نرخ‌ها لغو شد.")
+        return
+    try:
+        with open(pending, encoding="utf-8") as f:
+            new_rates = json.load(f)
+        backup = rates_admin.apply_rates(new_rates)
+        os.remove(pending)
+    except Exception as e:
+        logger.error(f"[ADMIN] اعمال نرخ‌های جدید ناموفق: {e}", exc_info=True)
+        await callback.answer("خطا")
+        await callback.message.answer(f"🛑 اعمال نرخ‌ها ناموفق بود (نرخ‌های قبلی همچنان فعال است): {e}")
+        return
+    await callback.answer("اعمال شد.")
+    await callback.message.answer(
+        "✅ نرخ‌های جدید فعال شد.\n\n" + rates_admin.describe_current()
+        + f"\n\n💾 نسخهٔ قبلی: {os.path.basename(backup)}\nبازگرداندن: /rates_rollback")
+
+
+@admin_router.message(Command("rates_rollback"))
+async def cmd_rates_rollback(message: Message):
+    if not _is_admin(message):
+        return
+    import rates_admin
+    try:
+        name = rates_admin.rollback()
+    except Exception as e:
+        await message.answer(f"🛑 بازگرداندن ناموفق بود: {e}")
+        return
+    if not name:
+        await message.answer("ℹ️ نسخهٔ پشتیبانی وجود ندارد.")
+        return
+    await message.answer(f"↩️ نسخهٔ {name} بازگردانده شد.\n\n" + rates_admin.describe_current())
