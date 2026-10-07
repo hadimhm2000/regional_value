@@ -26,7 +26,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
-    PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    Flowable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
 import ayani_calc as ac
@@ -500,6 +500,67 @@ def _draw_ltr(c, x_left, y, text, font, size, color):
     c.drawString(x_left, y, _bidi(text))
 
 
+class MapFlowable(Flowable):
+    """
+    تصویر نقشهٔ موقعیت ملک در فضای باقی‌ماندهٔ صفحه (حداکثر max_h). اگر جای کافی نباشد (کمتر از
+    min_h)، هیچ چیزی رسم نمی‌کند تا صفحهٔ اضافه ساخته نشود.
+    """
+
+    def __init__(self, path, width, max_h=62 * mm, min_h=32 * mm, P=None, shared=None, force=False):
+        super().__init__()
+        self.force = force   # آخرین جایگاه: اگر هنوز رسم نشده، همیشه (در صفحهٔ جدید) رسم شود
+        self.path, self.width, self.max_h, self.min_h, self.P = path, width, max_h, min_h, P or {}
+        self.shared = shared if shared is not None else {}   # چند جایگاه؛ فقط اولینِ جاشده رسم می‌شود
+        self.h = 0
+        self.top_pad = 0
+
+    def wrap(self, availWidth, availHeight):
+        if self.shared.get("owner") not in (None, id(self)):
+            self.h = 0
+            return (0, 0)
+        if self.force:
+            # در صفحهٔ جدید: فاصله از نوار سرتیتر صفحه‌های بعدی (۲۰ میلی‌متر)
+            self.top_pad = 22 * mm
+            self.h = self.max_h
+            self.shared["owner"] = id(self)
+            return (self.width, self.h + self.top_pad)
+        h = min(self.max_h, availHeight - 1)
+        self.h = h if h >= self.min_h else 0
+        if self.h:
+            self.shared["owner"] = id(self)
+        return (self.width if self.h else 0, self.h)
+
+    def draw(self):
+        if not self.h:
+            return
+        c = self.canv
+        cap = 5 * mm
+        img_h = self.h - cap
+        c.saveState()
+        _draw_rtl(c, self.width, img_h + 1.4 * mm, "موقعیت ملک روی نقشه", _FONTS["bold"], 9,
+                  self.P.get("accent", INK))
+        try:
+            from reportlab.lib.utils import ImageReader
+            ir = ImageReader(self.path)
+            iw, ih = ir.getSize()
+            # برش وسط تصویر به نسبت کادر (نشانگر وسط نقشه است)
+            box_ratio = self.width / img_h
+            if iw / ih > box_ratio:
+                draw_h, draw_w = img_h, img_h * iw / ih
+            else:
+                draw_w, draw_h = self.width, self.width * ih / iw
+            p = c.beginPath()
+            p.rect(0, 0, self.width, img_h)
+            c.clipPath(p, stroke=0)
+            c.drawImage(ir, (self.width - draw_w) / 2, (img_h - draw_h) / 2, draw_w, draw_h)
+        except Exception as e:
+            logger.warning(f"[AYANI-PDF] رسم نقشه ناموفق: {e}")
+        c.restoreState()
+        c.setStrokeColor(self.P.get("line", LINE))
+        c.setLineWidth(0.6)
+        c.rect(0, 0, self.width, img_h)
+
+
 def _draw_issuer(c, x_right, y, issuer, color=None, max_width=None):
     """
     سطر «صادرکننده: دفتر ... — کد ...» در سربرگ (اگر ثبت شده باشد). اگر از max_width بلندتر باشد،
@@ -605,7 +666,8 @@ def _render_classic(ctx):
                       colors.white)
             _draw_ltr(c, lx, top - 15 * mm, f"شماره: {ctx['report_no']}", _FONTS["regular"], 8.5,
                       colors.HexColor("#E3C77E"))
-        _footer_line(c, doc, P, left=MARGIN, right=PAGE_W - MARGIN, y=13 * mm, text=ctx["disclaimer"])
+        _footer_line(c, doc, P, left=MARGIN, right=PAGE_W - MARGIN, y=13 * mm, text=ctx["disclaimer"],
+                     total_pages=ctx.get("total_pages", 2))
         c.restoreState()
 
     def section(title):
@@ -648,6 +710,10 @@ def _render_classic(ctx):
     el.append(t)
     el.append(Spacer(1, 2 * mm))
     el.append(_p(f"به حروف: {ctx['words']} ریال", 8.6, P["muted"]))
+    map_slot = {}
+    if ctx.get("map_path"):   # جایگاه اول: پایین صفحهٔ اول (اگر جا باشد)
+        el.append(Spacer(1, 4 * mm))
+        el.append(MapFlowable(ctx["map_path"], W, P=P, shared=map_slot))
 
     el.append(PageBreak())
     el.append(Spacer(1, band2_h - 3 * mm))
@@ -665,6 +731,11 @@ def _render_classic(ctx):
     el.append(Spacer(1, 4 * mm))
     el += section("ضوابط اعمال‌شده")
     el += _bullets(ctx["rules"], P, size=7.9)
+    if ctx.get("map_path"):   # جایگاه دوم: پایین صفحهٔ دوم (اگر در صفحهٔ اول جا نشد)
+        el.append(Spacer(1, 3 * mm))
+        el.append(MapFlowable(ctx["map_path"], W, P=P, shared=map_slot))
+        # جایگاه آخر: اگر هیچ‌جا جا نشد، صفحهٔ جداگانه
+        el.append(MapFlowable(ctx["map_path"], W, max_h=110 * mm, P=P, shared=map_slot, force=True))
     return el, page, dict(leftMargin=MARGIN + 2 * mm, rightMargin=MARGIN + 2 * mm,
                           topMargin=12 * mm, bottomMargin=22 * mm)
 
@@ -934,8 +1005,9 @@ DESIGNS = {"classic": _render_classic, "cards": _render_cards, "minimal": _rende
 def build_ayani_pdf(output_path: str, *, province: str, county: str, address: str,
                     tax_result: dict, result: dict, date_text: str = None, time_text: str = None,
                     design: str = None, plak: str = None, report_no: str = None,
-                    verify_url: str = None, issuer: str = None) -> bool:
+                    verify_url: str = None, issuer: str = None, map_center=None) -> bool:
     """
+    map_center: (عرض، طول) — تصویر نقشهٔ نشان در پایین صفحهٔ اول (اگر سرویس در دسترس باشد)
     result: خروجی ayani_calc.compute_all
     tax_result: خروجی سامانهٔ مالیاتی (برای شماره بلوک/ردیف و اداره)
     report_no: کد رهگیری استعلام (ثبت‌شده در پایگاه داده) — در غیر این صورت شمارهٔ زمانی
@@ -955,6 +1027,14 @@ def build_ayani_pdf(output_path: str, *, province: str, county: str, address: st
     ctx = _collect(province, county, address, tax_result, result, date_text, time_text, plak=plak,
                    report_no=report_no, verify_url=verify_url, issuer=issuer)
     design = design if design in DESIGNS else DEFAULT_DESIGN
+    map_path = None
+    if map_center and design == "classic":
+        try:
+            import map_image
+            map_path = map_image.fetch_to_file(*map_center)
+        except Exception as e:
+            logger.warning(f"[AYANI-PDF] نقشه: {e}")
+    ctx["map_path"] = map_path
     try:
         if design == "sidebar":
             from reportlab.platypus import BaseDocTemplate
@@ -963,6 +1043,14 @@ def build_ayani_pdf(output_path: str, *, province: str, county: str, address: st
             doc.addPageTemplates(templates)
             doc.build(story)
         else:
+            if map_path:   # با نقشه ممکن است ۳ صفحه شود: یک بار برای شمارش صفحات ساخته می‌شود
+                import io
+                from pypdf import PdfReader
+                buf = io.BytesIO()
+                story, on_page, margins = DESIGNS[design](ctx)
+                SimpleDocTemplate(buf, pagesize=A4, author="", **margins).build(
+                    story, onFirstPage=on_page, onLaterPages=on_page)
+                ctx["total_pages"] = len(PdfReader(io.BytesIO(buf.getvalue())).pages)
             story, on_page, margins = DESIGNS[design](ctx)
             doc = SimpleDocTemplate(output_path, pagesize=A4, title="گزارش ارزش منطقه‌ای ملک",
                                     author="", **margins)
@@ -971,6 +1059,12 @@ def build_ayani_pdf(output_path: str, *, province: str, county: str, address: st
     except Exception as e:
         logger.error(f"[AYANI-PDF] خطا در ساخت PDF: {e}", exc_info=True)
         return False
+    finally:
+        if map_path:
+            try:
+                os.remove(map_path)
+            except OSError:
+                pass
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1104,7 +1198,7 @@ def build_batch_pdf(output_path: str, batch_code: str, items: list, verify_url_f
                                  address=it.get("address") or "", tax_result=it.get("tax_result") or {},
                                  result=it["calc"], plak=it.get("plak"), report_no=it["code"],
                                  verify_url=vf(it["code"]), date_text=it.get("date_text"),
-                                 time_text=it.get("time_text"), issuer=issuer)
+                                 time_text=it.get("time_text"), issuer=issuer, map_center=it.get("map_center"))
             if not ok:
                 return False
             parts.append(pth)

@@ -31,6 +31,7 @@ from regional_value_handlers import regional_value_router
 from menu_handlers import menu_router, renew_reminder_loop
 from utilities_handlers import utilities_router, cpi_reminder_loop
 from admin_commands import admin_router
+from ops_handlers import ops_router, ops_loop, track_users_middleware
 from sqlite_storage import SQLiteStorage
 from bale_retry import BaleRetryMiddleware, is_transient_error
 
@@ -72,7 +73,12 @@ async def _timing_middleware(handler, event, data):
             state = data.get("raw_state")
             logger.warning(f"[SLOW] {elapsed:.1f}s | user={user} | state={state} | text={text!r}")
 
+# ثبت کاربران (برای پیام همگانی / پیگیری تست)
+dp.update.outer_middleware()(track_users_middleware)
+
 dp.include_router(admin_router)
+# پشتیبانی، پیام همگانی، کد تخفیف، رسیدها، بکاپ، وضعیت سامانهٔ مالیاتی
+dp.include_router(ops_router)
 # منوی اصلی (/start، سوابق، اصالت، حساب کاربری، گزارش تجمیعی) قبل از فرم استعلام —
 # تا دکمه‌های منو در هر مرحله‌ای کار کنند
 dp.include_router(menu_router)
@@ -113,6 +119,7 @@ async def main():
     logger.info("در حال راه‌اندازی ربات...")
     reminder_task = asyncio.create_task(renew_reminder_loop(bot, RENEW_REMIND_DAYS, RENEW_CHECK_INTERVAL))
     cpi_task = asyncio.create_task(cpi_reminder_loop(bot))   # دریافت ماهانهٔ شاخص تورم بانک مرکزی
+    ops_task = asyncio.create_task(ops_loop(bot))   # بکاپ روزانه، پایش سامانهٔ مالیاتی، پیگیری تست
     try:
         while True:
             try:
@@ -126,6 +133,7 @@ async def main():
     finally:
         reminder_task.cancel()
         cpi_task.cancel()
+        ops_task.cancel()
 
 
 if __name__ == "__main__":

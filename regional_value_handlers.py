@@ -71,7 +71,8 @@ import history
 from payment import (send_subscription_invoice, parse_payload, INVOICE_PAYLOAD_TYPE, PAYLOAD_PRODUCT,
                      PRODUCT_PLANS)
 from bale_file_sender import send_document_direct
-from keyboards import after_result_kb, is_back, is_restart, main_menu_kb, nav_only_kb, nav_row
+from keyboards import (DISCOUNT_BUTTON, after_result_kb, discount_percent, is_back, is_restart, main_menu_kb,
+                       nav_only_kb, nav_row)
 
 logger = logging.getLogger(__name__)
 
@@ -370,11 +371,17 @@ async def _go_back(message: Message, state: FSMContext, current: str):
 # ══════════════════════════════════════════════════════════════════
 # نقطه ورود
 # ══════════════════════════════════════════════════════════════════
-async def regional_value_entry(message: Message, state: FSMContext, batch_code: str = None):
+async def regional_value_entry(message: Message, state: FSMContext, batch_code: str = None,
+                               skip_tax_check: bool = False):
     """
     شروع فرآیند استعلام (همهٔ داده‌های قبلی پاک می‌شود).
     batch_code: اگر داده شود، نتیجهٔ این استعلام به همان گزارش تجمیعی اضافه می‌شود.
+    اگر سامانهٔ مالیاتی قطع تشخیص داده شده باشد، قبل از فرم به کاربر اطلاع داده می‌شود.
     """
+    if not skip_tax_check:
+        import ops_handlers
+        if await ops_handlers.tax_down_notice(message, batch_code):
+            return
     await state.clear()
     await state.update_data(**{k: None for k in _ALL_KEYS}, rv_edit_snapshot=None, rv_batch=batch_code)
     if await _entry_access_gate(message, state):
@@ -1683,8 +1690,11 @@ def _fa_money(n: int) -> str:
     return _to_fa(f"{n:,}")
 
 
-def _plan_button(key: str) -> str:
+def _plan_button(key: str, percent: int = 0) -> str:
     p = SUBSCRIPTION_PLANS[key]
+    if percent:
+        from payment import plan_price
+        return f"🔹 {p['title']} — {_fa_money(plan_price('rv', key, percent)[0])} تومان ({_to_fa(percent)}٪ تخفیف)"
     return f"🔹 {p['title']} — {_fa_money(p['toman'])} تومان"
 
 
@@ -1704,13 +1714,12 @@ def _intro_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=_TEST_BUTTON)], nav_row()], resize_keyboard=True)
 
 
-def _plan_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=_plan_button("monthly"))],
-                  [KeyboardButton(text=_plan_button("yearly"))],
-                  nav_row()],
-        resize_keyboard=True,
-    )
+def _plan_kb(percent: int = 0) -> ReplyKeyboardMarkup:
+    rows = [[KeyboardButton(text=_plan_button("monthly", percent))],
+            [KeyboardButton(text=_plan_button("yearly", percent))]]
+    if not percent:
+        rows.append([KeyboardButton(text=DISCOUNT_BUTTON)])
+    return ReplyKeyboardMarkup(keyboard=rows + [nav_row()], resize_keyboard=True)
 
 
 def _continue_kb() -> ReplyKeyboardMarkup:
@@ -1900,7 +1909,10 @@ async def process_continue(message: Message, state: FSMContext, bot: Bot):
 
 # ── انتخاب اشتراک ──
 async def _ask_plan(message: Message, state: FSMContext, prefix: str = ""):
-    await message.answer(prefix + "💳 لطفاً اشتراک مدنظر خود را تعیین بفرمائید:", reply_markup=_plan_kb())
+    data = await state.get_data()
+    percent = discount_percent(data, "rv")
+    note = f"🎟 کد تخفیف {data['discount']['code']} ({_to_fa(percent)}٪) اعمال شد.\n\n" if percent else ""
+    await message.answer(prefix + note + "💳 لطفاً اشتراک مدنظر خود را تعیین بفرمائید:", reply_markup=_plan_kb(percent))
     await state.set_state(RVForm.waiting_plan)
 
 
@@ -1914,12 +1926,18 @@ async def process_plan(message: Message, state: FSMContext, bot: Bot):
         else:
             await go_main_menu(message, state)
         return
+    data = await state.get_data()
+    percent = discount_percent(data, "rv")
+    if message.text == DISCOUNT_BUTTON:
+        from ops_handlers import ask_discount_code
+        await ask_discount_code(message, state, "rv")
+        return
     plan = _plan_from_text(message.text)
     if not plan:
-        await message.answer("⚠️ لطفاً یکی از گزینه‌های ماهانه یا سالانه را انتخاب کنید.", reply_markup=_plan_kb())
+        await message.answer("⚠️ لطفاً یکی از گزینه‌های ماهانه یا سالانه را انتخاب کنید.", reply_markup=_plan_kb(percent))
         return
     user_id = message.from_user.id
-    if await send_subscription_invoice(bot, user_id, plan):
+    if await send_subscription_invoice(bot, user_id, plan, discount=data.get("discount") if percent else None):
         await state.update_data(rv_plan=plan)
         await state.set_state(RVForm.waiting_payment)
         await message.answer(
@@ -1931,7 +1949,7 @@ async def process_plan(message: Message, state: FSMContext, bot: Bot):
     else:
         await _notify_admin(bot, f"⚠️ ارسال فاکتور اشتراک برای کاربر {user_id} شکست خورد (بررسی BALE_WALLET_TOKEN).")
         await message.answer("⚠️ در حال حاضر امکان ساخت فاکتور پرداخت نیست. لطفاً کمی بعد دوباره تلاش کنید.",
-                             reply_markup=_plan_kb())
+                             reply_markup=_plan_kb(percent))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1939,11 +1957,10 @@ async def process_plan(message: Message, state: FSMContext, bot: Bot):
 # ══════════════════════════════════════════════════════════════════
 @regional_value_router.pre_checkout_query()
 async def rv_pre_checkout(pre_checkout_query: PreCheckoutQuery, bot: Bot):
+    from payment import expected_amount
     payload = parse_payload(getattr(pre_checkout_query, "invoice_payload", ""))
-    product = PAYLOAD_PRODUCT.get(payload.get("type"))
-    plan = PRODUCT_PLANS[product].get(payload.get("plan")) if product else None
-    ok = plan is not None \
-        and getattr(pre_checkout_query, "total_amount", plan["rial"] if plan else 0) == (plan or {}).get("rial")
+    expected = expected_amount(payload, pre_checkout_query.from_user.id)
+    ok = expected is not None and getattr(pre_checkout_query, "total_amount", expected) == expected
     try:
         if ok:
             await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
@@ -1980,28 +1997,10 @@ async def rv_successful_payment(message: Message, state: FSMContext, bot: Bot):
         await message.answer("✅ پرداخت شما تایید شد و یک استعلام رایگان برایتان ثبت شد.", reply_markup=_continue_kb())
         return
 
-    try:
-        sub = await access_control.activate_subscription(user_id, plan_key, plan["days"])
-    except Exception as e:
-        logger.error(f"[RV] خطا در فعال‌سازی اشتراک {user_id}: {e}", exc_info=True)
-        await _notify_admin(bot, f"🛑 پرداخت {plan['title']} کاربر {user_id} دریافت شد ولی فعال‌سازی اشتراک شکست خورد: {e}")
-        await message.answer("✅ پرداخت شما دریافت شد؛ فعال‌سازی اشتراک با خطا مواجه شد و به ادمین اطلاع داده شد.")
+    import billing
+    sub = await billing.complete_payment(message, bot, "rv", plan_key, payload)
+    if not sub:
         return
-
-    try:
-        access_control.record_payment(user_id, plan_key, getattr(sp, "total_amount", plan["rial"]),
-                                      getattr(sp, "provider_payment_charge_id", "") or "")
-        db.log_event("payment", user_id, plan_key)
-    except Exception as e:
-        logger.error(f"[RV] ثبت پرداخت کاربر {user_id} در پایگاه داده ناموفق: {e}", exc_info=True)
-    office = access_control.get_office_info(user_id)
-    await _notify_admin(
-        bot,
-        f"💳 خرید {plan['title']} — کاربر {getattr(message.from_user, 'full_name', '')} ({user_id})\n"
-        f"🏢 دفتر: {office.get('office_name') or 'ثبت نشده'} — کد: {office.get('office_code') or 'ثبت نشده'}\n"
-        "این خرید در اکسل اشتراک‌ها (/subs_excel) ثبت شد"
-        + ("" if office.get("office_name") else f"؛ ثبت نام دفتر: /office {user_id} کد_دفتر نام_دفتر"),
-    )
     expiry = _jalali_date(sub["expires_at"])
     head = f"✅ پرداخت تایید شد و {plan['title']} شما تا {expiry} فعال است."
     if _form_complete(await state.get_data()):
@@ -2096,7 +2095,7 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
     data = copy.deepcopy(await state.get_data())
     try:
         async with _query_semaphore:
-            result, last_error = await _run_query_attempts(user_id, data, attempts=2)
+            result, last_error = await _run_query_attempts(user_id, data, attempts=2, bot=bot)
             if last_error is None:
                 return await _process_query_result(bot, user_id, data, result, refund_credit)
 
@@ -2114,8 +2113,18 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
         await state.clear()
 
 
-async def _run_query_attempts(user_id: int, data: dict, attempts: int):
-    """استعلام از سامانه با تلاش مجدد؛ خروجی (result, last_error)."""
+async def _run_query_attempts(user_id: int, data: dict, attempts: int, bot: Bot = None):
+    """استعلام از سامانه با تلاش مجدد؛ خروجی (result, last_error). نتیجه در پایش سامانه ثبت می‌شود."""
+    result, err = await _run_query_attempts_raw(user_id, data, attempts)
+    try:
+        import ops_handlers
+        await ops_handlers.record_tax_result(bot, err is None, err)
+    except Exception as e:
+        logger.warning(f"[RV] ثبت وضعیت سامانهٔ مالیاتی ناموفق: {e}")
+    return result, err
+
+
+async def _run_query_attempts_raw(user_id: int, data: dict, attempts: int):
     loop = asyncio.get_running_loop()
     province = data.get("rv_province", "")
     address = data.get("rv_address", "")
@@ -2264,9 +2273,11 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
             code = history.save_query(
                 user_id, data, province=province, county=county_label, address=address, calc=calc,
                 tax_result=tax_result, plak=data.get("rv_plak_text") or None, has_building=has_building,
-                batch_code=batch_code, issuer=issuer,
+                batch_code=batch_code, issuer=issuer, lat=g_lat, lng=g_lng,
             )
             db.log_event("query_ok", user_id, code)
+            import ops_handlers
+            await ops_handlers.check_usage(bot, user_id)
         except Exception as e:
             logger.error(f"[RV] ثبت استعلام کاربر {user_id} در سوابق ناموفق: {e}", exc_info=True)
             batch_code = None
@@ -2295,6 +2306,7 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
             "code": code,
             "batch_code": batch_code,
             "issuer": issuer,
+            "map_center": (g_lat, g_lng) if g_lat is not None and g_lng is not None else None,
         }
         if await _build_and_send_pdf(bot, job):
             await _send_after_result(bot, user_id, code, batch_code)
@@ -2359,7 +2371,7 @@ async def _build_and_send_pdf(bot: Bot, job: dict) -> bool:
                         lambda: _build_pdf_sync(
                             pdf_path, job["province"], job["county"], job["address"],
                             job["tax_result"], job["calc"], plak=job["plak"], code=job.get("code"),
-                            issuer=job.get("issuer"),
+                            issuer=job.get("issuer"), map_center=job.get("map_center"),
                         ),
                     ),
                     timeout=_STEP_TIMEOUT_SECONDS,
@@ -2470,7 +2482,7 @@ async def _query_retry_worker(bot: Bot, user_id: int, data: dict, refund_credit:
             await asyncio.sleep(_QUERY_RETRY_DELAY_SECONDS)
             logger.info(f"[RV] تلاش مجدد {attempt}/{_QUERY_RETRY_MAX_ATTEMPTS} استعلام برای کاربر {user_id}")
             async with _query_semaphore:
-                result, err = await _run_query_attempts(user_id, data, attempts=1)
+                result, err = await _run_query_attempts(user_id, data, attempts=1, bot=bot)
                 if err is None:
                     logger.info(f"[RV] استعلام کاربر {user_id} در تلاش پس‌زمینهٔ {attempt} موفق شد")
                     await _process_query_result(bot, user_id, data, result, refund_credit)
@@ -2505,12 +2517,13 @@ def verify_url(code: str) -> str:
     return f"https://ble.ir/{BOT_USERNAME}?start=v_{code.replace('-', '')}"
 
 
-def _build_pdf_sync(pdf_path, province, county, address, tax_result, calc, plak=None, code=None, issuer=None):
+def _build_pdf_sync(pdf_path, province, county, address, tax_result, calc, plak=None, code=None, issuer=None,
+                    map_center=None):
     from ayani_pdf import build_ayani_pdf
     return build_ayani_pdf(
         pdf_path, province=province, county=county, address=address,
         tax_result=tax_result, result=calc, plak=plak,
-        report_no=code, verify_url=verify_url(code) if code else None, issuer=issuer,
+        report_no=code, verify_url=verify_url(code) if code else None, issuer=issuer, map_center=map_center,
     )
 
 

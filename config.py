@@ -102,3 +102,27 @@ BATCH_MAX_ITEMS = int(os.environ.get("BATCH_MAX_ITEMS", "15"))
 
 # فایل اکسل اشتراک‌ها که پس از هر خرید/تغییر اشتراک خودکار به‌روز می‌شود (همان خروجی /subs_excel)
 SUBS_EXCEL_PATH = os.environ.get("SUBS_EXCEL_PATH", os.path.join(DATA_DIR, "subscriptions.xlsx"))
+
+# ═══ پشتیبان‌گیری خودکار ═══
+BACKUP_HOUR = int(os.environ.get("BACKUP_HOUR", "3"))          # ساعت ارسال پشتیبان روزانه (وقت تهران)
+BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "7"))          # تعداد نسخه‌های نگه‌داشته‌شده روی سرور
+
+# ═══ پایش سامانهٔ مالیاتی ═══
+TAX_DOWN_THRESHOLD = int(os.environ.get("TAX_DOWN_THRESHOLD", "3"))   # چند خطای پیاپی = قطع
+TAX_PROBE_INTERVAL = int(os.environ.get("TAX_PROBE_INTERVAL", "300"))  # بررسی دوباره هنگام قطعی (ثانیه)
+
+# ═══ پیگیری خودکار تست‌گیرندگان ═══
+TRIAL_FOLLOWUP_DAYS = int(os.environ.get("TRIAL_FOLLOWUP_DAYS", "3"))
+TRIAL_FOLLOWUP_DISCOUNT = int(os.environ.get("TRIAL_FOLLOWUP_DISCOUNT", "10"))   # ۰ = بدون کد تخفیف
+TRIAL_FOLLOWUP_CODE_DAYS = int(os.environ.get("TRIAL_FOLLOWUP_CODE_DAYS", "7"))
+
+# ═══ هشدار استفادهٔ غیرعادی (احتمال اشتراک مشترک بین چند دفتر) ═══
+USAGE_ALERT_DAILY = int(os.environ.get("USAGE_ALERT_DAILY", "50"))         # استعلام در ۲۴ ساعت
+USAGE_ALERT_PROVINCES = int(os.environ.get("USAGE_ALERT_PROVINCES", "5"))  # تعداد استان مختلف در ۲۴ ساعت
+
+# ═══ پیام همگانی ═══
+BROADCAST_DELAY = float(os.environ.get("BROADCAST_DELAY", "0.07"))        # فاصلهٔ ارسال هر پیام (ثانیه)
+
+# ═══ تصویر نقشه در PDF ارزش منطقه‌ای (سرویس نقشهٔ ایستای نشان، با همان NESHAN_API_KEY) ═══
+NESHAN_STATIC_MAP = os.environ.get("NESHAN_STATIC_MAP", "1") not in ("0", "false", "no", "")
+NESHAN_STATIC_MAP_KEY = os.environ.get("NESHAN_STATIC_MAP_KEY", "") or NESHAN_API_KEY

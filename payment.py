@@ -23,7 +23,39 @@ PRODUCT_PAYLOAD = {"rv": INVOICE_PAYLOAD_TYPE, "util": UTIL_PAYLOAD_TYPE}
 PAYLOAD_PRODUCT = {v: k for k, v in PRODUCT_PAYLOAD.items()}
 
 
-async def send_subscription_invoice(bot, user_id: int, plan: str, product: str = "rv") -> bool:
+def plan_price(product: str, plan: str, percent: int = 0) -> tuple:
+    """(قیمت نهایی تومان، قیمت نهایی ریال، قیمت اصلی تومان) با اعمال درصد تخفیف."""
+    p = PRODUCT_PLANS[product][plan]
+    if percent:
+        from discounts import discounted_toman
+        toman = discounted_toman(p["toman"], percent)
+    else:
+        toman = p["toman"]
+    return toman, toman * 10, p["toman"]
+
+
+def expected_amount(payload: dict, user_id: int):
+    """
+    مبلغ درست (ریال) برای یک فاکتور بر اساس payload — برای تایید pre_checkout.
+    None اگر payload نامعتبر باشد یا کد تخفیفش دیگر برای این کاربر معتبر نباشد.
+    """
+    product = PAYLOAD_PRODUCT.get(payload.get("type"))
+    plan = payload.get("plan")
+    if not product or plan not in PRODUCT_PLANS[product]:
+        return None
+    percent = 0
+    if payload.get("dc"):
+        from discounts import DiscountError, validate
+        try:
+            percent = validate(payload["dc"], user_id, product)["percent"]
+        except DiscountError:
+            return None
+    return plan_price(product, plan, percent)[1]
+
+
+async def send_subscription_invoice(bot, user_id: int, plan: str, product: str = "rv",
+                                    discount: dict | None = None) -> bool:
+    """discount: {"code", "percent"} — کد تخفیف معتبر (قبلاً با discounts.validate بررسی شده)."""
     if not BALE_WALLET_TOKEN:
         logger.error("[PAYMENT] BALE_WALLET_TOKEN تنظیم نشده — امکان ساخت فاکتور پرداخت نیست.")
         return False
@@ -32,20 +64,24 @@ async def send_subscription_invoice(bot, user_id: int, plan: str, product: str =
         logger.error(f"[PAYMENT] پلن نامعتبر: {plan}")
         return False
 
-    payload = json.dumps({"type": PRODUCT_PAYLOAD[product], "plan": plan, "uid": user_id})
+    percent = int((discount or {}).get("percent") or 0)
+    toman, rial, list_toman = plan_price(product, plan, percent)
+    data = {"type": PRODUCT_PAYLOAD[product], "plan": plan, "uid": user_id}
+    if percent:
+        data["dc"] = discount["code"]
+    desc = f"{p['title']} ({p['days']} روز): {toman:,} تومان"
+    if percent:
+        desc += f" (قیمت اصلی {list_toman:,} تومان، {percent}٪ تخفیف با کد {discount['code']})"
     ok = await send_invoice(
         chat_id=user_id,
         title=p["title"] if product == "util" else f"{p['title']} سامانه استعلام ارزش منطقه‌ای",
-        description=(
-            f"{p['title']} ({p['days']} روز): {p['toman']:,} تومان\n"
-            f"پس از پرداخت، اشتراک شما به‌صورت خودکار فعال می‌شود."
-        ),
-        payload=payload,
+        description=desc + "\nپس از پرداخت، اشتراک شما به‌صورت خودکار فعال می‌شود.",
+        payload=json.dumps(data),
         provider_token=BALE_WALLET_TOKEN,
-        prices=[{"label": p["title"], "amount": p["rial"]}],
+        prices=[{"label": p["title"], "amount": rial}],
     )
     if ok:
-        logger.info(f"[PAYMENT] فاکتور {p['title']} ({p['toman']:,} تومان) برای کاربر {user_id} ارسال شد")
+        logger.info(f"[PAYMENT] فاکتور {p['title']} ({toman:,} تومان) برای کاربر {user_id} ارسال شد")
     return ok
 
 

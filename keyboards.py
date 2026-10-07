@@ -9,6 +9,8 @@ HISTORY_BUTTON = "📂 سوابق استعلام"
 VERIFY_BUTTON = "🔎 بررسی اصالت گزارش"
 ACCOUNT_BUTTON = "👤 حساب کاربری و اشتراک"
 UTIL_BUTTON = "🧰 خدمات کاربردی"
+SUPPORT_BUTTON = "💬 پشتیبانی"
+DISCOUNT_BUTTON = "🎟 کد تخفیف دارم"
 BACK_BUTTON = "🔙 بازگشت"
 RESTART_BUTTON = "🏠 شروع مجدد"
 
@@ -55,6 +57,12 @@ def is_batch_pdf_button(text) -> bool:
     return _norm(text).startswith(_norm(BATCH_PDF_BUTTON))
 
 
+def discount_percent(data: dict, product: str) -> int:
+    """درصد کد تخفیفِ اعمال‌شده در وضعیت فرم برای این محصول (یا ۰)."""
+    d = (data or {}).get("discount") or {}
+    return int(d.get("percent") or 0) if d.get("product") in (product, "all") else 0
+
+
 def nav_row():
     """ردیف ثابت پایین همهٔ مرحله‌ها: بازگشت به مرحلهٔ قبل + شروع مجدد (منوی اصلی)."""
     return [KeyboardButton(text=BACK_BUTTON), KeyboardButton(text=RESTART_BUTTON)]
@@ -70,7 +78,7 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=MAIN_MENU_BUTTON)],
             [KeyboardButton(text=UTIL_BUTTON)],
             [KeyboardButton(text=HISTORY_BUTTON), KeyboardButton(text=VERIFY_BUTTON)],
-            [KeyboardButton(text=ACCOUNT_BUTTON)],
+            [KeyboardButton(text=ACCOUNT_BUTTON), KeyboardButton(text=SUPPORT_BUTTON)],
         ],
         resize_keyboard=True,
     )

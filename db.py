@@ -114,6 +114,53 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_events_kind ON events(kind, created_at);
+CREATE TABLE IF NOT EXISTS users (                -- همهٔ کاربرانی که با ربات کار کرده‌اند (پیام همگانی)
+    user_id     INTEGER PRIMARY KEY,
+    full_name   TEXT,
+    username    TEXT,
+    first_seen  REAL NOT NULL,
+    last_seen   REAL NOT NULL,
+    blocked     INTEGER NOT NULL DEFAULT 0  -- ربات را مسدود کرده (ارسال پیام همگانی ناموفق)
+);
+CREATE TABLE IF NOT EXISTS discount_codes (
+    code        TEXT PRIMARY KEY,
+    percent     INTEGER NOT NULL,
+    product     TEXT NOT NULL DEFAULT 'all',   -- rv | util | all
+    max_uses    INTEGER,                       -- NULL = نامحدود
+    used        INTEGER NOT NULL DEFAULT 0,
+    expires_at  REAL,                          -- NULL = بدون انقضا
+    for_user    INTEGER,                       -- کد شخصی (پیگیری تست)؛ NULL = عمومی
+    note        TEXT,
+    active      INTEGER NOT NULL DEFAULT 1,
+    created_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS discount_uses (
+    code        TEXT NOT NULL,
+    user_id     INTEGER NOT NULL,
+    payment_id  INTEGER,
+    used_at     REAL NOT NULL,
+    PRIMARY KEY (code, user_id)
+);
+CREATE TABLE IF NOT EXISTS followups (             -- پیام‌های پیگیری خودکار (هر نوع یک بار برای هر کاربر)
+    user_id     INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    sent_at     REAL NOT NULL,
+    PRIMARY KEY (user_id, kind)
+);
+CREATE TABLE IF NOT EXISTS support_msgs (          -- پیام‌های پشتیبانی که برای ادمین فرستاده شده‌اند
+    admin_msg_id INTEGER PRIMARY KEY,
+    user_id      INTEGER NOT NULL,
+    created_at   REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage_alerts (          -- هشدار حجم غیرعادی (روزی یک بار برای هر کاربر)
+    user_id     INTEGER NOT NULL,
+    day         TEXT NOT NULL,
+    PRIMARY KEY (user_id, day)
+);
+CREATE TABLE IF NOT EXISTS kv (                    -- وضعیت‌های کوچک (آخرین پشتیبان، وضعیت سامانهٔ مالیاتی، ...)
+    key         TEXT PRIMARY KEY,
+    value       TEXT
+);
 CREATE TABLE IF NOT EXISTS fsm (
     key         TEXT PRIMARY KEY,
     state       TEXT,
@@ -143,9 +190,25 @@ def init(path: str | None = None, migrate_from: str | None = None) -> None:
             _conn.execute("PRAGMA journal_mode=WAL")
         _conn.execute("PRAGMA synchronous=NORMAL")
         _conn.executescript(_SCHEMA)
+        _add_columns(_conn)
         _path = path
     if migrate_from:
         _migrate_json(migrate_from)
+
+
+# ستون‌هایی که بعد از نسخهٔ اول اضافه شده‌اند (روی پایگاه دادهٔ موجود ALTER می‌شوند)
+_EXTRA_COLUMNS = {
+    "payments": [("product", "TEXT"), ("plan_key", "TEXT"), ("days", "INTEGER"), ("starts_at", "REAL"),
+                 ("expires_at", "REAL"), ("list_price_rial", "INTEGER"), ("discount_code", "TEXT")],
+}
+
+
+def _add_columns(c: sqlite3.Connection) -> None:
+    for table, cols in _EXTRA_COLUMNS.items():
+        have = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        for name, typ in cols:
+            if name not in have:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
 
 
 def conn() -> sqlite3.Connection:
@@ -182,6 +245,32 @@ def execute(sql: str, params=()) -> int:
     """اجرای یک دستور تکی؛ خروجی: تعداد ردیف‌های تغییرکرده."""
     with _lock:
         return conn().execute(sql, params).rowcount
+
+
+def insert(sql: str, params=()) -> int:
+    """INSERT تکی؛ خروجی: شناسهٔ ردیف جدید."""
+    with _lock:
+        return conn().execute(sql, params).lastrowid
+
+
+def kv_get(key: str, default=None):
+    r = query_one("SELECT value FROM kv WHERE key=?", (key,))
+    return r["value"] if r else default
+
+
+def kv_set(key: str, value) -> None:
+    execute("INSERT INTO kv(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, None if value is None else str(value)))
+
+
+def backup_to(path: str) -> None:
+    """نسخهٔ سازگار (consistent) از کل پایگاه داده در path — حتی وقتی ربات در حال نوشتن است."""
+    dest = sqlite3.connect(path)
+    try:
+        with _lock:
+            conn().backup(dest)
+    finally:
+        dest.close()
 
 
 # ══════════════════════════════════════════════════════════════════

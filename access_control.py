@@ -228,9 +228,16 @@ def set_office_info(user_id: int, office_name=None, office_code=None, note=None)
                (int(user_id), merged["office_name"], merged["office_code"], merged["note"], time.time()))
 
 
-def record_payment(user_id: int, plan: str, amount_rial: int, charge_id: str = "") -> None:
-    db.execute("INSERT INTO payments(user_id, plan, amount_rial, charge_id, created_at) VALUES (?,?,?,?,?)",
-               (int(user_id), plan, int(amount_rial or 0), charge_id or "", time.time()))
+def record_payment(user_id: int, plan: str, amount_rial: int, charge_id: str = "", *, product: str = None,
+                   plan_key: str = None, days: int = None, expires_at: float = None, list_price_rial: int = None,
+                   discount_code: str = None) -> int:
+    """ثبت پرداخت؛ خروجی: شناسهٔ پرداخت (شمارهٔ رسید)."""
+    starts_at = (expires_at - days * 86400) if (expires_at and days) else None
+    return db.insert(
+        "INSERT INTO payments(user_id, plan, amount_rial, charge_id, created_at, product, plan_key, days, starts_at, "
+        "expires_at, list_price_rial, discount_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (int(user_id), plan, int(amount_rial or 0), charge_id or "", time.time(), product, plan_key, days, starts_at,
+         expires_at, list_price_rial, discount_code))
 
 
 # ── یادآوری تمدید ──

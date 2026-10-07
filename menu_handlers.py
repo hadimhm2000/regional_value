@@ -264,7 +264,7 @@ async def send_query_pdf(user_id: int, q: dict) -> bool:
             path, province=q["province"] or "", county=q["county"] or "", address=q["address"] or "",
             tax_result=q["tax_result"], result=q["calc"], plak=q.get("plak"), date_text=date_text,
             time_text=time_text, report_no=q["code"], verify_url=verify_url(q["code"]),
-            issuer=q.get("issuer") or access_control.issuer_line(user_id),
+            issuer=q.get("issuer") or access_control.issuer_line(user_id), map_center=q.get("map_center"),
         )), timeout=_PDF_TIMEOUT_SECONDS)
         if not ok:
             return False
@@ -495,12 +495,16 @@ async def _send_account(message: Message, uid: int):
         lines.append("\n🧰 خدمات کاربردی: " + (
             f"اشتراک فعال تا {fa_date(util['expires_at'])} ({_fa(_days_left(util['expires_at']))} روز باقی‌مانده)"
             if util else "اشتراک ندارد (هر بخش یک بار رایگان)"))
-    kb = None
+    rows = []
     if not approved:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
+        rows = [
             [InlineKeyboardButton(text="💳 خرید / تمدید اشتراک ارزش منطقه‌ای", callback_data="acc:renew")],
             [InlineKeyboardButton(text="🧰 خرید / تمدید اشتراک خدمات کاربردی", callback_data="acc:util")],
-        ])
+        ]
+    import db
+    if db.query_one("SELECT 1 FROM payments WHERE user_id=? LIMIT 1", (uid,)):
+        rows.append([InlineKeyboardButton(text="🧾 رسیدهای پرداخت", callback_data="acc:receipts")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
     await message.answer("\n".join(lines), reply_markup=kb)
 
 
