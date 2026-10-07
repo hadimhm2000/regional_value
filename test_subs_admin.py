@@ -39,6 +39,14 @@ def _col(key):
     return sa.IDX[key] + 1
 
 
+def _row(**kw):
+    """ردیف اکسل از روی نام ستون‌ها (مستقل از ترتیب ستون‌ها)."""
+    row = [None] * len(sa.HEADERS)
+    for k, v in kw.items():
+        row[sa.IDX[k]] = v
+    return row
+
+
 @pytest.mark.parametrize("j", [(1405, 1, 1), (1405, 6, 31), (1405, 7, 30), (1403, 12, 30), (1399, 12, 30)])
 def test_jalali_roundtrip(j):
     g = sa.jalali_to_gregorian(*j)
@@ -85,12 +93,14 @@ def test_add_new_manual_subscription_and_office_name():
     path = _export()
     wb = load_workbook(path)
     ws = wb[sa.SHEET_TITLE]
-    ws.append([555, "دفتر خدمات قضایی شمارهٔ ۵", "5555", "", "1405/12/29", None, "", "", "", "", "", "", "", "یادداشت"])
+    ws.append(_row(user_id=555, office_name="دفتر خدمات قضایی شمارهٔ ۵", office_code="5555",
+                   expires="1405/12/29", note="یادداشت"))
     wb.save(path)
     res = sa.parse_xlsx(path)
     assert res["ok"], res["errors"]
     a = res["actions"][0]
-    assert a["user_id"] == 555 and a["plan"] == "manual" and a["notify"]
+    assert a["user_id"] == 555 and a["subs"]["rv"]["plan"] == "manual" and a["subs"]["rv"]["notify"]
+    assert "util" not in a["subs"]
     notify = run(sa.apply_actions(res["actions"]))
     assert notify and notify[0][0] == 555
     sub = run(ac.get_subscription(555))
@@ -103,17 +113,18 @@ def test_new_id_by_days_and_errors():
     path = _export()
     wb = load_workbook(path)
     ws = wb[sa.SHEET_TITLE]
-    ws.append([601, "", "", "ماهانه", "", 30])
+    ws.append(_row(user_id=601, plan="ماهانه", days_left=30))
     wb.save(path)
     res = sa.parse_xlsx(path)
     assert res["ok"]
     run(sa.apply_actions(res["actions"]))
     assert 29 <= (run(ac.get_subscription(601))["expires_at"] - time.time()) / 86400 <= 31
 
-    for bad, msg in [([602, "", "", "", "1405/07/31"], "تاریخ پایان نامعتبر"),
-                     (["abc", "x"], "آیدی عددی نامعتبر"),
-                     ([603, "", "", "سه‌ماهه", "1405/12/01"], "نوع اشتراک"),
-                     ([604, "", "", "ماهانه"], "تاریخ پایان یا روزهای باقی‌مانده")]:
+    for bad, msg in [(_row(user_id=602, expires="1405/07/31"), "تاریخ پایان اشتراک ارزش منطقه‌ای نامعتبر"),
+                     (_row(user_id="abc", office_name="x"), "آیدی عددی نامعتبر"),
+                     (_row(user_id=603, plan="سه‌ماهه", expires="1405/12/01"), "نوع اشتراک ارزش منطقه‌ای"),
+                     (_row(user_id=604, plan="ماهانه"), "تاریخ پایان یا روزهای باقی‌مانده"),
+                     (_row(user_id=605, util_expires="1405/13/01"), "تاریخ پایان اشتراک خدمات کاربردی")]:
         p2 = _export()
         wb = load_workbook(p2)
         wb[sa.SHEET_TITLE].append(bad)
@@ -158,3 +169,24 @@ def test_refresh_file_after_purchase():
     run(ac.activate_subscription(77, "yearly", 365))
     _, rows = _rows(SUBS_EXCEL_PATH)
     assert 77 in rows
+
+
+def test_utilities_subscription_columns_are_independent():
+    run(ac.activate_subscription(41, "monthly", 30))                    # فقط ارزش منطقه‌ای
+    run(ac.activate_subscription(42, "yearly", 365, product="util"))    # فقط خدمات کاربردی
+    path = _export()
+    wb = load_workbook(path)
+    ws = wb[sa.SHEET_TITLE]
+    rows = {ws.cell(r, 1).value: r for r in range(2, ws.max_row + 1) if ws.cell(r, 1).value}
+    assert ws.cell(rows[42], _col("util_plan")).value == "سالانه"
+    assert ws.cell(rows[42], _col("plan")).value in ("", None)
+    ws.cell(rows[41], _col("util_days")).value = 45        # خدمات کاربردی دستی برای کاربر ۴۱
+    ws.cell(rows[42], _col("util_days")).value = 0         # لغو خدمات کاربردی کاربر ۴۲
+    wb.save(path)
+    res = sa.parse_xlsx(path)
+    assert res["ok"], res["errors"]
+    notify = run(sa.apply_actions(res["actions"]))
+    assert [(n[0], n[3]) for n in notify] == [(41, "util")]
+    assert run(ac.get_subscription(41, "util"))["plan"] == "manual"
+    assert run(ac.get_subscription(41)) is not None          # اشتراک ارزش منطقه‌ای دست نخورده
+    assert run(ac.get_subscription(42, "util")) is None

@@ -29,6 +29,7 @@ from config import (BOT_TOKEN, BALE_API_BASE, ADMIN_ID, NESHAN_API_KEY, EXECUTOR
                     RENEW_CHECK_INTERVAL, RENEW_REMIND_DAYS)
 from regional_value_handlers import regional_value_router
 from menu_handlers import menu_router, renew_reminder_loop
+from utilities_handlers import utilities_router, cpi_reminder_loop
 from admin_commands import admin_router
 from sqlite_storage import SQLiteStorage
 from bale_retry import BaleRetryMiddleware, is_transient_error
@@ -75,6 +76,7 @@ dp.include_router(admin_router)
 # منوی اصلی (/start، سوابق، اصالت، حساب کاربری، گزارش تجمیعی) قبل از فرم استعلام —
 # تا دکمه‌های منو در هر مرحله‌ای کار کنند
 dp.include_router(menu_router)
+dp.include_router(utilities_router)   # 🧰 خدمات کاربردی (خسارت/مهریه، هزینه دادرسی، تمبر، ابزار فایل)
 dp.include_router(regional_value_router)
 
 
@@ -110,6 +112,7 @@ async def main():
 
     logger.info("در حال راه‌اندازی ربات...")
     reminder_task = asyncio.create_task(renew_reminder_loop(bot, RENEW_REMIND_DAYS, RENEW_CHECK_INTERVAL))
+    cpi_task = asyncio.create_task(cpi_reminder_loop(bot))   # دریافت ماهانهٔ شاخص تورم بانک مرکزی
     try:
         while True:
             try:
@@ -122,6 +125,7 @@ async def main():
                 await asyncio.sleep(5)
     finally:
         reminder_task.cancel()
+        cpi_task.cancel()
 
 
 if __name__ == "__main__":

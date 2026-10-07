@@ -10,6 +10,7 @@
 import asyncio
 import datetime
 import itertools
+import os
 import time
 
 import pytest
@@ -76,6 +77,7 @@ class Harness:
         import admin_commands
         import menu_handlers
         import regional_value_handlers as rvh
+        import utilities_handlers
         from aiogram import Router
         from sqlite_storage import SQLiteStorage
 
@@ -84,11 +86,12 @@ class Harness:
         self.bot = Bot("123456:TEST-TOKEN", session=self.session)
         self.dp = Dispatcher(storage=SQLiteStorage())
         # روترها ماژول-سطح هستند؛ برای هر تست یک روتر والد تازه می‌سازیم
-        for r in (admin_commands.admin_router, menu_handlers.menu_router, rvh.regional_value_router):
+        routers = (admin_commands.admin_router, menu_handlers.menu_router,
+                   utilities_handlers.utilities_router, rvh.regional_value_router)
+        for r in routers:
             r._parent_router = None
         parent = Router()
-        parent.include_routers(admin_commands.admin_router, menu_handlers.menu_router,
-                               rvh.regional_value_router)
+        parent.include_routers(*routers)
         self.dp.include_router(parent)
         self.ids = itertools.count(1)
         self.cb_ids = itertools.count(1)
@@ -103,22 +106,36 @@ class Harness:
         self.documents = []
 
         async def fake_send_document(chat_id, file_path, filename=None, caption=None, reply_markup=None):
-            from pypdf import PdfReader
-            reader = PdfReader(file_path)
-            text = "".join(p.extract_text() or "" for p in reader.pages[:1])
+            with open(file_path, "rb") as f:
+                head = f.read(4)
+            pages, text = 0, ""
+            if head == b"%PDF":
+                from pypdf import PdfReader
+                reader = PdfReader(file_path)
+                pages = len(reader.pages)
+                text = "".join(p.extract_text() or "" for p in reader.pages[:1])
             self.documents.append({"chat_id": chat_id, "filename": filename, "caption": caption,
-                                   "pages": len(reader.pages), "text": text})
+                                   "pages": pages, "text": text, "size": os.path.getsize(file_path)})
             return True
         monkeypatch.setattr(rvh, "send_document_direct", fake_send_document)
         monkeypatch.setattr(menu_handlers, "send_document_direct", fake_send_document)
+        import bale_file_sender
+        monkeypatch.setattr(bale_file_sender, "send_document_direct", fake_send_document)
+        self.photos = []
+
+        async def fake_send_photo(chat_id, file_path, caption=None, reply_markup=None):
+            from PIL import Image
+            self.photos.append(Image.open(file_path).size)
+            return True
+        monkeypatch.setattr(bale_file_sender, "send_photo_direct", fake_send_photo)
 
     def _user(self, uid):
         return User(id=uid, is_bot=False, first_name=f"کاربر{uid}")
 
-    async def send(self, text=None, uid=USER, location=None):
+    async def send(self, text=None, uid=USER, location=None, **extra):
         msg = Message(message_id=next(self.ids), date=datetime.datetime.now(),
                       chat=Chat(id=uid, type="private"), from_user=self._user(uid), text=text,
-                      location=location)
+                      location=location, **extra)
         await self.dp.feed_update(self.bot, Update(update_id=next(self.ids), message=msg))
 
     async def click(self, data, uid=USER):
@@ -390,4 +407,187 @@ def test_admin_subscription_excel_roundtrip(h, monkeypatch):
         texts = h.session.texts()
         assert any("توسط مدیر سامانه" in (t or "") for t in texts)  # اطلاع به کاربر
         assert "ثبت شد" in texts[-1]
+    run(go())
+
+
+
+# ══════════════════════════════════════════════════════════════════
+# 🧰 خدمات کاربردی
+# ══════════════════════════════════════════════════════════════════
+def _util_state(st):
+    return (st or "").split(":")[-1]
+
+
+def test_utilities_one_free_use_per_tool_then_paywall(h):
+    async def go():
+        import utilities_handlers as uh
+        await h.send("🧰 خدمات کاربردی")
+        assert _util_state(await h.state()) == "menu"
+        assert "هر بخش ۱ بار رایگان" in h.session.last().text
+
+        # هزینهٔ دادرسی: یک مبلغ = یک استفاده (چند مرحله برای همان مبلغ آزاد است)
+        await h.send(uh.TOOLS["court_fee"])
+        assert "۱ استفادهٔ رایگان" in h.session.last().text
+        await h.send("500000000")
+        await h.send(list(uh.CF_CATEGORIES)[0])
+        assert "15,500,000" in h.session.last().text
+        await h.send(list(uh.CF_CATEGORIES)[1])
+        assert "22,500,000" in h.session.last().text
+        assert access_control.util_used(USER, "court_fee") == 1
+        await h.send(uh.CF_NEW_AMOUNT)
+        assert _util_state(await h.state()) == "plan"
+        assert "۸۰۰,۰۰۰ تومان" in h.session.last().text and "۸,۰۰۰,۰۰۰ تومان" in h.session.last().text
+
+        # بخش دیگر (تمبر) هنوز رایگان است
+        await h.send("🔙 بازگشت")
+        await h.send(uh.TOOLS["stamp"])
+        await h.send(uh.STAMP_BY_FEE)
+        await h.send("1000000000")
+        assert any("۸۷٬۵۰۰٬۰۰۰" in (t or "") for t in h.session.texts()[-3:])
+        await h.send(uh.STAMP_BY_FEE)
+        assert _util_state(await h.state()) == "plan"
+
+        # خسارت تأخیر: یک محاسبه رایگان با خروجی PDF، دومی ← اشتراک
+        await h.send("🔙 بازگشت")
+        await h.send(uh.TOOLS["damages"])
+        await h.send(uh.DMG_LATE_TEXT)
+        await h.send("500000000")
+        await h.send("1403/07/01")
+        await h.send("1405/07/11")
+        doc = h.documents[-1]
+        assert doc["pages"] == 1 and "1,288,925,398" in doc["caption"]
+        await h.send(uh.DMG_MAHR_TEXT)
+        assert _util_state(await h.state()) == "plan"
+        assert db.query_one("SELECT COUNT(*) n FROM events WHERE kind='util_paywall'")["n"] == 3
+    run(go())
+
+
+def test_utilities_purchase_unlocks_all_tools_but_not_regional_value(h):
+    async def go():
+        import json
+        from aiogram.types import SuccessfulPayment
+        import utilities_handlers as uh
+        access_control.record_util_use(USER, "court_fee")       # رایگان مصرف شده
+        await h.send("🧰 خدمات کاربردی")
+        await h.send(uh.TOOLS["court_fee"])
+        assert _util_state(await h.state()) == "plan"
+        await h.send(uh._plan_button("monthly"))   # بدون توکن کیف‌پول فاکتور ساخته نمی‌شود
+        assert "امکان ساخت فاکتور" in h.session.last().text
+
+        sp = SuccessfulPayment(currency="IRR", total_amount=8_000_000,
+                               invoice_payload=json.dumps({"type": "util_sub", "plan": "monthly", "uid": USER}),
+                               telegram_payment_charge_id="t", provider_payment_charge_id="p")
+        msg = Message(message_id=77, date=datetime.datetime.now(), chat=Chat(id=USER, type="private"),
+                      from_user=User(id=USER, is_bot=False, first_name="x"), successful_payment=sp)
+        await h.dp.feed_update(h.bot, Update(update_id=7700, message=msg))
+        assert await access_control.get_subscription(USER, "util") is not None
+        assert await access_control.get_subscription(USER) is None            # ارزش منطقه‌ای جداست
+        assert db.query_one("SELECT plan FROM payments")["plan"] == "util:monthly"
+        assert any("خدمات کاربردی" in (t or "") for t in h.session.texts(ADMIN))
+        assert _util_state(await h.state()) == "menu"
+        await h.send(uh.TOOLS["court_fee"])
+        assert "اشتراک خدمات کاربردی فعال" in h.session.last().text
+        await h.send("100000000")
+        await h.send(list(uh.CF_CATEGORIES)[0])
+        assert "2,500,000" in h.session.last().text
+    run(go())
+
+
+def test_pre_checkout_accepts_utilities_invoice(h):
+    async def go():
+        import json
+        from aiogram.types import PreCheckoutQuery
+        q = PreCheckoutQuery(id="q1", from_user=User(id=USER, is_bot=False, first_name="x"), currency="IRR",
+                             total_amount=8_000_000,
+                             invoice_payload=json.dumps({"type": "util_sub", "plan": "monthly", "uid": USER}))
+        await h.dp.feed_update(h.bot, Update(update_id=8800, pre_checkout_query=q))
+        assert h.session.last("AnswerPreCheckoutQuery").ok is True
+        bad = q.model_copy(update={"id": "q2", "total_amount": 1})
+        await h.dp.feed_update(h.bot, Update(update_id=8801, pre_checkout_query=bad))
+        assert h.session.last("AnswerPreCheckoutQuery").ok is False
+    run(go())
+
+
+def test_approved_user_has_unlimited_utilities(h):
+    async def go():
+        import utilities_handlers as uh
+        await access_control.approve_user(USER)
+        await h.send("🧰 خدمات کاربردی")
+        await h.send(uh.TOOLS["stamp"])
+        for _ in range(3):
+            await h.send(uh.STAMP_MALI)
+            await h.send("1000000000")
+        assert access_control.util_used(USER, "stamp") == 3
+        assert _util_state(await h.state()) == "stamp_type"
+    run(go())
+
+
+def test_file_tools_compress_and_pdf_to_images(h, monkeypatch):
+    async def go():
+        import os
+        import shutil
+        import tempfile
+        from aiogram.types import Document
+        from PIL import Image
+        from reportlab.pdfgen import canvas
+        import utilities_handlers as uh
+
+        d = tempfile.mkdtemp()
+        img_path = os.path.join(d, "big.png")
+        Image.effect_noise((1600, 1200), 80).convert("RGB").save(img_path)
+        pdf_path = os.path.join(d, "doc.pdf")
+        c = canvas.Canvas(pdf_path)
+        for i in range(3):
+            c.drawString(100, 700, f"page {i + 1}")
+            c.showPage()
+        c.save()
+        sources = {"img": img_path, "pdf": pdf_path}
+
+        async def fake_download(file, destination=None, **kw):
+            shutil.copy(sources[file.file_id], destination)
+        monkeypatch.setattr(h.bot, "download", fake_download)
+
+        await h.send("🧰 خدمات کاربردی")
+        await h.send(uh.TOOLS["file_tools"])
+        await h.send(uh.FT_COMPRESS)
+        await h.send(None, document=Document(file_id="img", file_unique_id="u1", file_name="big.png",
+                                             mime_type="image/png"))
+        assert "کاهش حجم انجام شد" in h.documents[-1]["caption"]
+        assert h.documents[-1]["size"] <= 500 * 1024
+        assert access_control.util_used(USER, "file_tools") == 1
+        # استفادهٔ رایگان تمام شده → عکس بعدی پردازش نمی‌شود
+        n_docs = len(h.documents)
+        await h.send(None, document=Document(file_id="img", file_unique_id="u2", file_name="big.png",
+                                             mime_type="image/png"))
+        assert len(h.documents) == n_docs
+        assert _util_state(await h.state()) == "plan"
+        assert h.photos == []
+
+        # با اشتراک: PDF سه‌صفحه‌ای → سه عکس
+        await access_control.activate_subscription(USER, "monthly", 30, product="util")
+        await h.send("🔙 بازگشت")
+        await h.send(uh.TOOLS["file_tools"])
+        await h.send(uh.FT_PDF2IMG)
+        await h.send(None, document=Document(file_id="pdf", file_unique_id="u3", file_name="doc.pdf",
+                                             mime_type="application/pdf"))
+        assert len(h.photos) == 3
+        assert any("۳ عکس جداگانه" in (t or "") for t in h.session.texts())
+    run(go())
+
+
+def test_account_and_reminder_for_utilities(h):
+    async def go():
+        import menu_handlers
+        await h.send("👤 حساب کاربری و اشتراک")
+        assert "خدمات کاربردی: اشتراک ندارد" in h.session.last().text
+        assert ("🧰 خرید / تمدید اشتراک خدمات کاربردی", "acc:util") in h.last_inline()
+        await h.click("acc:util")
+        assert _util_state(await h.state()) == "plan"
+
+        now = time.time()
+        db.execute("INSERT INTO util_subscriptions(user_id, plan, expires_at, updated_at) VALUES (?,?,?,?)",
+                   (USER, "monthly", now + 86400, now))
+        assert await menu_handlers.send_renew_reminders(h.bot, 3) == 1
+        m = h.session.last()
+        assert "خدمات کاربردی" in m.text and m.reply_markup.inline_keyboard[0][0].callback_data == "acc:util"
     run(go())

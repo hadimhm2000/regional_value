@@ -10,27 +10,32 @@ payment.py — فاکتور کیف‌پول بله برای خرید اشترا�
 import json
 import logging
 
-from config import BALE_WALLET_TOKEN, SUBSCRIPTION_PLANS
+from config import BALE_WALLET_TOKEN, SUBSCRIPTION_PLANS, UTIL_SUBSCRIPTION_PLANS
 from bale_file_sender import send_invoice
 
 logger = logging.getLogger(__name__)
 
-INVOICE_PAYLOAD_TYPE = "rv_sub"
+INVOICE_PAYLOAD_TYPE = "rv_sub"        # اشتراک استعلام ارزش منطقه‌ای
+UTIL_PAYLOAD_TYPE = "util_sub"         # اشتراک خدمات کاربردی
+
+PRODUCT_PLANS = {"rv": SUBSCRIPTION_PLANS, "util": UTIL_SUBSCRIPTION_PLANS}
+PRODUCT_PAYLOAD = {"rv": INVOICE_PAYLOAD_TYPE, "util": UTIL_PAYLOAD_TYPE}
+PAYLOAD_PRODUCT = {v: k for k, v in PRODUCT_PAYLOAD.items()}
 
 
-async def send_subscription_invoice(bot, user_id: int, plan: str) -> bool:
+async def send_subscription_invoice(bot, user_id: int, plan: str, product: str = "rv") -> bool:
     if not BALE_WALLET_TOKEN:
         logger.error("[PAYMENT] BALE_WALLET_TOKEN تنظیم نشده — امکان ساخت فاکتور پرداخت نیست.")
         return False
-    p = SUBSCRIPTION_PLANS.get(plan)
+    p = PRODUCT_PLANS[product].get(plan)
     if not p:
         logger.error(f"[PAYMENT] پلن نامعتبر: {plan}")
         return False
 
-    payload = json.dumps({"type": INVOICE_PAYLOAD_TYPE, "plan": plan, "uid": user_id})
+    payload = json.dumps({"type": PRODUCT_PAYLOAD[product], "plan": plan, "uid": user_id})
     ok = await send_invoice(
         chat_id=user_id,
-        title=f"{p['title']} سامانه استعلام ارزش منطقه‌ای",
+        title=p["title"] if product == "util" else f"{p['title']} سامانه استعلام ارزش منطقه‌ای",
         description=(
             f"{p['title']} ({p['days']} روز): {p['toman']:,} تومان\n"
             f"پس از پرداخت، اشتراک شما به‌صورت خودکار فعال می‌شود."

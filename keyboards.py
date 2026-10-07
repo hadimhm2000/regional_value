@@ -8,6 +8,7 @@ MAIN_MENU_BUTTON = "🗺️ استعلام ارزش منطقه‌ای ملک"
 HISTORY_BUTTON = "📂 سوابق استعلام"
 VERIFY_BUTTON = "🔎 بررسی اصالت گزارش"
 ACCOUNT_BUTTON = "👤 حساب کاربری و اشتراک"
+UTIL_BUTTON = "🧰 خدمات کاربردی"
 BACK_BUTTON = "🔙 بازگشت"
 RESTART_BUTTON = "🏠 شروع مجدد"
 
@@ -67,6 +68,7 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=MAIN_MENU_BUTTON)],
+            [KeyboardButton(text=UTIL_BUTTON)],
             [KeyboardButton(text=HISTORY_BUTTON), KeyboardButton(text=VERIFY_BUTTON)],
             [KeyboardButton(text=ACCOUNT_BUTTON)],
         ],

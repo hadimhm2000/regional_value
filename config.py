@@ -49,6 +49,19 @@ SUBSCRIPTION_PLANS = {
 for _p in SUBSCRIPTION_PLANS.values():
     _p["rial"] = _p["toman"] * 10
 
+# ═══ اشتراک «خدمات کاربردی» (خسارت و مهریه، هزینه دادرسی، تمبر، ابزار فایل) ═══
+# جدا از اشتراک استعلام ارزش منطقه‌ای؛ هر بخش UTIL_FREE_PER_TOOL بار رایگان است
+UTIL_SUB_MONTHLY_TOMAN = int(os.environ.get("UTIL_SUB_MONTHLY_TOMAN", "800000"))    # ۸۰۰,۰۰۰ تومان
+UTIL_SUB_YEARLY_TOMAN = int(os.environ.get("UTIL_SUB_YEARLY_TOMAN", "8000000"))     # ۸,۰۰۰,۰۰۰ تومان
+UTIL_FREE_PER_TOOL = int(os.environ.get("UTIL_FREE_PER_TOOL", "1"))
+
+UTIL_SUBSCRIPTION_PLANS = {
+    "monthly": {"title": "اشتراک ماهانهٔ خدمات کاربردی", "toman": UTIL_SUB_MONTHLY_TOMAN, "days": SUB_MONTHLY_DAYS},
+    "yearly": {"title": "اشتراک سالانهٔ خدمات کاربردی", "toman": UTIL_SUB_YEARLY_TOMAN, "days": SUB_YEARLY_DAYS},
+}
+for _p in UTIL_SUBSCRIPTION_PLANS.values():
+    _p["rial"] = _p["toman"] * 10
+
 # تعداد استعلام رایگانِ «تست» پس از تایید ادمین
 TRIAL_CREDITS = int(os.environ.get("TRIAL_CREDITS", "2"))
 

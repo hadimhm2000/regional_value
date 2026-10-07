@@ -250,6 +250,12 @@ def build_stats_text(now: float = None) -> str:
              row("📄 دریافت دوبارهٔ PDF", ev("pdf_resend")),
              row("📑 گزارش تجمیعی", ev("batch_pdf")),
              row("🔎 بررسی اصالت", ev("verify")),
+             "", "— خدمات کاربردی —",
+             row("📈 خسارت و مهریه", ev("util_damages")),
+             row("🧾 هزینه دادرسی", ev("util_court_fee")),
+             row("💰 تمبر", ev("util_stamp")),
+             row("🛠 ابزار فایل", ev("util_file_tools")),
+             row("🔒 رسیدن به سقف رایگان", ev_users("util_paywall")),
              "", "— قیف (۳۰ روز) —"]
     s30, c30, o30 = starts[2], confirms[2], ok[2]
     if s30:
@@ -265,8 +271,10 @@ def build_stats_text(now: float = None) -> str:
     active_subs = db.query_one("SELECT COUNT(*) n FROM subscriptions WHERE expires_at>?", (now,))["n"]
     expiring = db.query_one("SELECT COUNT(*) n FROM subscriptions WHERE expires_at>? AND expires_at<=?",
                             (now, now + 7 * 86400))["n"]
+    active_util = db.query_one("SELECT COUNT(*) n FROM util_subscriptions WHERE expires_at>?", (now,))["n"]
     lines += ["", "— وضعیت فعلی —",
-              f"💳 مشترکان فعال: {_fa(active_subs)} (پایان در ۷ روز آینده: {_fa(expiring)})",
+              f"💳 مشترکان فعال ارزش منطقه‌ای: {_fa(active_subs)} (پایان در ۷ روز آینده: {_fa(expiring)})",
+              f"🧰 مشترکان فعال خدمات کاربردی: {_fa(active_util)}",
               f"✅ کاربران رایگانِ ادمین: {_fa(db.query_one('SELECT COUNT(*) n FROM approved_users')['n'])}",
               f"⏳ درخواست تست در انتظار: {_fa(pending_trials)}",
               f"📂 کل استعلام‌های ثبت‌شده: {_fa(db.query_one('SELECT COUNT(*) n FROM queries')['n'])}"]
@@ -333,7 +341,8 @@ async def cmd_rates(message: Message):
 
 
 @admin_router.message(F.document & F.document.file_name.lower().endswith(".xlsx")
-                      & (F.from_user.id == (ADMIN_ID or -1)))
+                      & (F.from_user.id == (ADMIN_ID or -1))
+                      & ~F.caption.startswith("/cpi"))   # اکسل شاخص تورم (/cpi_import) → خدمات کاربردی
 async def admin_xlsx_upload(message: Message):
     """اکسل ارسالی ادمین: اگر برگهٔ «اشتراک‌ها» دارد → اکسل اشتراک‌ها؛ وگرنه → نرخ اعیانی."""
     import json
@@ -533,10 +542,10 @@ async def cb_subs_decision(callback: CallbackQuery):
         await callback.message.answer(f"🛑 ثبت تغییرات ناموفق بود: {e}")
         return
     sent = 0
-    for uid, exp, plan in notify:
+    for uid, exp, plan, product in notify:
         try:
             await callback.bot.send_message(
-                uid, f"✅ {access_control.plan_title(plan)} شما توسط مدیر سامانه تا "
+                uid, f"✅ {access_control.plan_title(plan, product)} شما توسط مدیر سامانه تا "
                      f"{_fa(subs_admin.ts_to_jalali_str(exp))} فعال شد.", reply_markup=main_menu_kb())
             sent += 1
         except Exception as e:

@@ -30,7 +30,7 @@ import db
 import history
 from bale_file_sender import send_document_direct
 from config import ADMIN_ID, BATCH_MAX_ITEMS, HISTORY_PAGE_SIZE
-from keyboards import (ACCOUNT_BUTTON, BATCH_ADD_BUTTON, HISTORY_BUTTON, MAIN_MENU_BUTTON, VERIFY_BUTTON,
+from keyboards import (ACCOUNT_BUTTON, BATCH_ADD_BUTTON, HISTORY_BUTTON, MAIN_MENU_BUTTON, UTIL_BUTTON, VERIFY_BUTTON,
                        is_back, is_batch_pdf_button, is_button, is_main_menu_button, is_restart, main_menu_kb,
                        nav_only_kb)
 
@@ -110,6 +110,7 @@ async def _go_main(message: Message, state: FSMContext, text: str = "🏠 منو
 WELCOME = (
     "👋 به ربات استعلام ارزش منطقه‌ای خوش آمدید.\n\n"
     f"• «{MAIN_MENU_BUTTON}»: استعلام و محاسبهٔ ارزش عرصه و اعیانی با خروجی PDF\n"
+    f"• «{UTIL_BUTTON}»: خسارت تأخیر و مهریه، هزینه دادرسی، تمبر و ابزار فایل\n"
     f"• «{HISTORY_BUTTON}»: استعلام‌های قبلی، دریافت دوبارهٔ PDF و محاسبهٔ مجدد\n"
     f"• «{VERIFY_BUTTON}»: بررسی اصالت یک گزارش با کد رهگیری\n"
     f"• «{ACCOUNT_BUTTON}»: وضعیت و تمدید اشتراک"
@@ -124,6 +125,22 @@ async def cmd_start(message: Message, state: FSMContext, command: CommandObject)
         await _verify_and_reply(message, arg[2:])
         return
     await message.answer(WELCOME, reply_markup=main_menu_kb())
+
+
+@menu_router.message(F.successful_payment)
+async def successful_payment(message: Message, state: FSMContext, bot: Bot):
+    """
+    پرداخت موفق در هر وضعیتی (حتی وسط فرم خدمات کاربردی یا استعلام) — قبل از
+    هندلرهای وضعیت‌ها پردازش می‌شود تا هیچ پرداختی گم نشود.
+    """
+    from regional_value_handlers import rv_successful_payment
+    await rv_successful_payment(message, state, bot)
+
+
+@menu_router.pre_checkout_query()
+async def pre_checkout(pre_checkout_query, bot: Bot):
+    from regional_value_handlers import rv_pre_checkout
+    await rv_pre_checkout(pre_checkout_query, bot)
 
 
 @menu_router.message(lambda m: bool(m.text) and is_main_menu_button(m.text))
@@ -470,11 +487,29 @@ async def _send_account(message: Message, uid: int):
     if credits:
         lines.append(f"🎁 استعلام رایگان باقی‌مانده: {_fa(credits)}")
     lines.append(f"📊 استعلام‌های ثبت‌شده: {_fa(history.count_user_queries(uid))}")
+    util = await access_control.get_own_subscription(uid, "util")
+    if not approved:
+        lines.append("\n🧰 خدمات کاربردی: " + (
+            f"اشتراک فعال تا {fa_date(util['expires_at'])} ({_fa(_days_left(util['expires_at']))} روز باقی‌مانده)"
+            if util else "اشتراک ندارد (هر بخش یک بار رایگان)"))
     kb = None
     if not approved:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="💳 خرید / تمدید اشتراک", callback_data="acc:renew")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 خرید / تمدید اشتراک ارزش منطقه‌ای", callback_data="acc:renew")],
+            [InlineKeyboardButton(text="🧰 خرید / تمدید اشتراک خدمات کاربردی", callback_data="acc:util")],
+        ])
     await message.answer("\n".join(lines), reply_markup=kb)
+
+
+@menu_router.callback_query(F.data == "acc:util")
+async def cb_util_renew(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    from utilities_handlers import offer_plans
+    await state.clear()
+    own = await access_control.get_own_subscription(callback.from_user.id, "util")
+    prefix = (f"ℹ️ اشتراک فعلی خدمات کاربردی تا {fa_date(own['expires_at'])} فعال است؛ مدت جدید به انتهای "
+              "آن اضافه می‌شود.\n\n") if own else ""
+    await offer_plans(callback.message, state, prefix)
 
 
 @menu_router.callback_query(F.data == "acc:renew")
@@ -493,20 +528,22 @@ async def cb_renew(callback: CallbackQuery, state: FSMContext):
 # ══════════════════════════════════════════════════════════════════
 # یادآوری تمدید اشتراک (وظیفهٔ پس‌زمینه — از main.py اجرا می‌شود)
 # ══════════════════════════════════════════════════════════════════
-def _renew_kb() -> InlineKeyboardMarkup:
+def _renew_kb(product: str = "rv") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="💳 تمدید اشتراک", callback_data="acc:renew")]])
+        InlineKeyboardButton(text="💳 تمدید اشتراک", callback_data="acc:renew" if product == "rv" else "acc:util")]])
 
 
 async def send_renew_reminders(bot: Bot, soon_days: int) -> int:
     """یک دور بررسی و ارسال یادآوری‌ها؛ خروجی: تعداد پیام‌های ارسال‌شده."""
     sent = 0
-    for r in access_control.due_renew_reminders(soon_days):
+    due = access_control.due_renew_reminders(soon_days) + \
+        access_control.due_renew_reminders(soon_days, product="util")
+    for r in due:
         uid, exp = r["user_id"], r["expires_at"]
         if await access_control.is_approved(uid):
-            access_control.mark_reminded(uid, r["kind"], exp)
+            access_control.mark_reminded(uid, r["kind"], exp, r["product"])
             continue
-        title = access_control.plan_title(r["plan"])
+        title = access_control.plan_title(r["plan"], r["product"])
         if r["kind"] == "soon":
             text = (f"⏰ {title} شما {_fa(_days_left(exp))} روز دیگر ({fa_date(exp)}) به پایان می‌رسد.\n"
                     "برای جلوگیری از وقفه در استعلام‌ها، همین حالا تمدید کنید؛ مدت جدید به انتهای اشتراک "
@@ -515,13 +552,13 @@ async def send_renew_reminders(bot: Bot, soon_days: int) -> int:
             text = (f"🔔 {title} شما در تاریخ {fa_date(exp)} به پایان رسید.\n"
                     "برای ادامهٔ استفاده از سامانه، اشتراک را تمدید کنید.")
         try:
-            await bot.send_message(uid, text, reply_markup=_renew_kb())
+            await bot.send_message(uid, text, reply_markup=_renew_kb(r["product"]))
             sent += 1
-            db.log_event(f"remind_{r['kind']}", uid)
+            db.log_event(f"remind_{r['kind']}", uid, r["product"])
         except Exception as e:
             logger.warning(f"[RENEW] ارسال یادآوری به {uid} ناموفق: {e}")
         # حتی اگر ارسال ناموفق بود (مثلاً ربات بلاک شده)، دوباره تلاش نمی‌شود
-        access_control.mark_reminded(uid, r["kind"], exp)
+        access_control.mark_reminded(uid, r["kind"], exp, r["product"])
     return sent
 
 
