@@ -12,6 +12,7 @@ admin_commands.py — دستورهای مدیریتی، فقط برای ADMIN_ID
 /rates                  — دریافت اکسل نرخ اعیانی فعلی؛ ارسال اکسل ویرایش‌شده = به‌روزرسانی (با تایید)
 /rates_rollback         — بازگرداندن نسخهٔ قبلی نرخ‌ها
 /subs_excel             — اکسل همهٔ مشترکان (با نام و کد دفتر)؛ ارسال اکسل ویرایش‌شده = افزودن/تغییر اشتراک‌ها (با تایید)
+/diyeh_rate [سال مبلغ]  — نمایش/ثبت مبلغ دیهٔ کامل سال (ریال)
 /office <آیدی> <کد دفتر> <نام دفتر> — ثبت نام و کد دفتر خدمات قضایی برای یک آیدی
 دکمه‌های «✅ تایید / ❌ رد» زیر پیام درخواست تست — تایید = ۲ استعلام رایگان
 """
@@ -255,6 +256,8 @@ def build_stats_text(now: float = None) -> str:
              row("🧾 هزینه دادرسی", ev("util_court_fee")),
              row("💰 تمبر", ev("util_stamp")),
              row("🛠 ابزار فایل", ev("util_file_tools")),
+             row("⚖️ دیه", ev("util_diyeh")),
+             row("👪 سهم‌الارث", ev("util_inheritance")),
              row("🔒 رسیدن به سقف رایگان", ev_users("util_paywall")),
              "", "— قیف (۳۰ روز) —"]
     s30, c30, o30 = starts[2], confirms[2], ok[2]
@@ -572,3 +575,25 @@ async def cmd_office(message: Message):
     access_control.refresh_subs_excel()
     info = access_control.get_office_info(uid)
     await message.answer(f"✅ ثبت شد — آیدی {uid}\n🏢 {info.get('office_name') or '—'}\n🔢 کد دفتر: {info.get('office_code')}")
+
+
+
+# ══════════════════════════════════════════════════════════════════
+# /diyeh_rate — مبلغ دیهٔ کامل هر سال (بخشنامهٔ سالانهٔ رئیس قوه قضاییه)
+# ══════════════════════════════════════════════════════════════════
+@admin_router.message(Command("diyeh_rate"))
+async def cmd_diyeh_rate(message: Message):
+    if not _is_admin(message):
+        return
+    import diyeh_calc as dyc
+    nums = []
+    for p in (message.text or "").split()[1:]:
+        t = p.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")).replace(",", "").replace("٬", "")
+        nums.append(int(t) if t.isdigit() else None)
+    if len(nums) == 2 and all(nums) and 1370 <= nums[0] <= 1500 and nums[1] > 0:
+        dyc.set_full_diyeh(nums[0], nums[1])
+        await message.answer(f"✅ دیهٔ کامل سال {_fa(nums[0])} = {_fa(f'{nums[1]:,}')} ریال ثبت شد.")
+        return
+    last = list(dyc.full_diyeh_table().items())[-5:]
+    await message.answer("⚖️ مبلغ دیهٔ کامل (ریال):\n" + "\n".join(f"• {_fa(y)}: {_fa(f'{v:,}')}" for y, v in last)
+                         + "\n\nثبت یا اصلاح سال جدید:\n/diyeh_rate 1406 27000000000")

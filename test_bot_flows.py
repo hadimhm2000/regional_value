@@ -591,3 +591,134 @@ def test_account_and_reminder_for_utilities(h):
         m = h.session.last()
         assert "خدمات کاربردی" in m.text and m.reply_markup.inline_keyboard[0][0].callback_data == "acc:util"
     run(go())
+
+
+# ══════════════════════════════════════════════════════════════════
+# ⚖️ دیه و 👪 سهم‌الارث
+# ══════════════════════════════════════════════════════════════════
+def test_diyeh_flow_organ_female_and_paywall(h):
+    async def go():
+        import diyeh_calc as dyc
+        import legal_tools_handlers as lt
+        import utilities_handlers as uh
+        await h.send("🧰 خدمات کاربردی")
+        await h.send(uh.TOOLS["diyeh"])
+        assert "21,000,000,000" in h.session.last().text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+        await h.send("۱۴۰۵")
+        await h.send(lt.DY_METHOD_BUTTONS[dyc.METHOD_ORGAN])
+        cat = dyc.categories().index("چشم")
+        await h.send(str(cat + 1))
+        item = next(i for i, it in enumerate(dyc.items(cat)) if it["title"] == "درآوردن یا از بین بردن یک چشم بینا")
+        await h.send(str(item + 1))
+        await h.send("1")                      # تعداد
+        assert _util_state(await h.state()) == "dy_sex"
+        await h.send("👩 زن")
+        assert any("5,250,000,000 ریال" in (t or "") for t in h.session.texts()[-4:])
+        assert h.documents[-1]["pages"] == 1 and "5,250,000,000" in h.documents[-1]["caption"]
+        assert access_control.util_used(USER, "diyeh") == 1
+        # استفادهٔ دوم ← پیشنهاد اشتراک
+        await h.send(lt.DY_METHOD_BUTTONS[dyc.METHOD_HOMICIDE])
+        assert _util_state(await h.state()) == "plan"
+    run(go())
+
+
+def test_diyeh_homicide_holy_month_and_textual_rule(h):
+    async def go():
+        import diyeh_calc as dyc
+        import legal_tools_handlers as lt
+        import utilities_handlers as uh
+        await access_control.approve_user(USER)
+        await h.send("🧰 خدمات کاربردی")
+        await h.send(uh.TOOLS["diyeh"])
+        await h.send("1405")
+        await h.send(lt.DY_METHOD_BUTTONS[dyc.METHOD_HOMICIDE])
+        await h.send("👨 مرد")
+        await h.send(lt.YES)
+        assert any("28,000,000,000 ریال" in (t or "") for t in h.session.texts()[-4:])
+        # حکم متنی: بدون مبلغ و بدون PDF
+        n_docs = len(h.documents)
+        await h.send(lt.DY_METHOD_BUTTONS[dyc.METHOD_ORGAN])
+        await h.send("1")                      # استخوان
+        await h.send("1")                      # شکستن استخوان هر عضو
+        assert any("یک پنجم دیه آن عضو" in (t or "") for t in h.session.texts()[-3:])
+        assert len(h.documents) == n_docs
+        # کسری
+        await h.send(lt.DY_METHOD_BUTTONS[dyc.METHOD_FRACTION])
+        await h.send("1/2 از ۱/۳")
+        assert any("3,500,000,000 ریال" in (t or "") for t in h.session.texts()[-4:])
+    run(go())
+
+
+def test_inheritance_board_flow(h):
+    async def go():
+        import legal_tools_handlers as lt
+        import utilities_handlers as uh
+        await h.send("🧰 خدمات کاربردی")
+        await h.send(uh.TOOLS["inheritance"])
+        await h.send("👨 متوفی مرد بود و همسر داشت")
+        await h.send("۱")                                   # یک همسر
+        assert _util_state(await h.state()) == "inh_board"
+        buttons = [d for _, d in h.last_inline()]
+        assert "inh:tog:pedar" in buttons and "inh:inc:pesar" in buttons and "inh:scr:br" in buttons
+        await h.click("inh:tog:pedar")
+        await h.click("inh:tog:madar")
+        assert "inh:inc:baradarAbaveyni" in [d for _, d in h.last_inline()]   # ردیف حجب مادر
+        await h.click("inh:inc:pesar")
+        for _ in range(2):
+            await h.click("inh:inc:dokhtar")
+        await h.click("inh:dec:dokhtar")
+        await h.click("inh:inc:dokhtar")
+        assert "inh:scr:br" not in [d for _, d in h.last_inline()]          # با فرزند زنده، نوه مطرح نیست
+        await h.click("inh:next")
+        assert _util_state(await h.state()) == "inh_estate"
+        await h.send("36000000000")
+        text = next(t for t in reversed(h.session.texts()) if t and "نتیجهٔ تقسیم ترکه" in t)
+        assert "4,500,000,000 ریال" in text      # همسر ۱/۸
+        assert "9,750,000,000 ریال" in text      # پسر ۱۳/۴۸
+        assert "4,875,000,000 ریال" in text      # هر دختر ۱۳/۹۶
+        assert h.documents[-1]["pages"] >= 1
+        assert access_control.util_used(USER, "inheritance") == 1
+    run(go())
+
+
+def test_inheritance_empty_classes_move_to_next_and_grandchildren(h):
+    async def go():
+        import utilities_handlers as uh
+        await access_control.approve_user(USER)
+        await h.send("🧰 خدمات کاربردی")
+        await h.send(uh.TOOLS["inheritance"])
+        await h.send("🚫 متوفی همسر نداشت")
+        # نوه‌ها: یک پسر فوت‌شده با ۱ نوهٔ پسر و ۱ نوهٔ دختر
+        await h.click("inh:scr:br")
+        await h.click("inh:badd")
+        await h.click("inh:inc:b0gs")
+        await h.click("inh:inc:b0gd")
+        await h.click("inh:scr:c1")
+        assert "۱ شاخه" in " ".join(t for t, _ in h.last_inline())
+        await h.click("inh:next")
+        await h.send("⏭ بدون مبلغ ترکه")
+        text = next(t for t in reversed(h.session.texts()) if t and "نتیجهٔ تقسیم ترکه" in t)
+        assert "2/3" in text and "1/3" in text
+
+        # طبقهٔ اول خالی ← طبقهٔ دوم
+        await h.send("🚫 متوفی همسر نداشت")
+        await h.click("inh:next")
+        assert "inh:inc:siblingOmmi" in [d for _, d in h.last_inline()]
+        await h.click("inh:inc:baradarAbaveyni")
+        await h.click("inh:inc:siblingOmmi")
+        await h.click("inh:next")
+        await h.send("⏭ بدون مبلغ ترکه")
+        text = next(t for t in reversed(h.session.texts()) if t and "نتیجهٔ تقسیم ترکه" in t)
+        assert "1/6" in text and "5/6" in text
+    run(go())
+
+
+def test_admin_diyeh_rate(h, monkeypatch, tmp_path):
+    async def go():
+        import diyeh_calc as dyc
+        monkeypatch.setattr(dyc, "RATES_FILE", str(tmp_path / "rates.json"))
+        await h.send("/diyeh_rate 1406 27000000000", uid=ADMIN)
+        assert dyc.full_diyeh(1406) == 27_000_000_000
+        await h.send("/diyeh_rate 1406 1", uid=USER)          # غیرادمین اثری ندارد
+        assert dyc.full_diyeh(1406) == 27_000_000_000
+    run(go())
