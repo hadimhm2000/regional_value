@@ -93,7 +93,8 @@ Ok "پکیج‌های اصلی نصب‌اند"
 & $Python -c "import fitz" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Warn "PyMuPDF بارگذاری نشد؛ نصب دوبارهٔ نسخهٔ 1.24.9 (همان نسخهٔ ربات اصلی)..."
-    & $Python -m pip install "PyMuPDF==1.24.9" --force-reinstall --no-deps -q --disable-pip-version-check
+    & $Python -m pip uninstall -y PyMuPDF PyMuPDFb pymupdf -q
+    & $Python -m pip install "PyMuPDF==1.24.9" "PyMuPDFb==1.24.9" --no-cache-dir -q --disable-pip-version-check
     & $Python -c "import fitz" 2>$null
 }
 if ($LASTEXITCODE -eq 0) { Ok "PyMuPDF سالم است" }
