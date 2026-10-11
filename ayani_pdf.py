@@ -275,6 +275,8 @@ def _collect(province, county, address, tax_result, result, date_text, time_text
             bld.append(("مقدار در سند", result["building_share_desc"], True))
 
     rules = ["ارزش عرصه از سامانهٔ سازمان امور مالیاتی (ارزش معاملاتی هر متر مربع) × متراژ عرصه محاسبه شده است."]
+    if result.get("location_note"):
+        rules.append(result["location_note"])
     if land["land_use"] == "سایر":
         rules.append(f"برای کاربری‌های «سایر»، ارزش عرصه بر مبنای ارزش معاملاتی {land['base_use']} × ضریب تعدیل "
                      f"{_num(land['coef'])} محاسبه می‌شود (ضرایب: ۰٫۷، ۰٫۵، ۰٫۴، ۰٫۲، ۰٫۱).")

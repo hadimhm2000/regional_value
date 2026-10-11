@@ -85,6 +85,10 @@ _query_semaphore = asyncio.Semaphore(MAX_CONCURRENT_QUERIES)
 
 # سقف زمانی هر مرحلهٔ شبکه‌ای/سنگین
 _STEP_TIMEOUT_SECONDS = 45
+try:
+    from geocode_and_query import NEAREST_TIME_BUDGET as _NEAREST_BUDGET
+except Exception:   # pragma: no cover
+    _NEAREST_BUDGET = 100
 
 
 class RVForm(StatesGroup):
@@ -2134,7 +2138,8 @@ async def _run_query_attempts_raw(user_id: int, data: dict, attempts: int):
         try:
             result = await asyncio.wait_for(
                 loop.run_in_executor(None, _do_query_sync, province, address, rv_lat, rv_lng),
-                timeout=_STEP_TIMEOUT_SECONDS,
+                # مهلت شامل جستجوی نزدیک‌ترین بلوک دارای ارزش هم هست
+                timeout=_STEP_TIMEOUT_SECONDS + _NEAREST_BUDGET,
             )
             return result, None
         except Exception as e:
@@ -2171,9 +2176,13 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
         all_lu_values = extract_all_land_use_values(tax_result)
         if not any(v is not None for v in all_lu_values.values()):
             db.log_event("no_value", user_id, f"{province} | {address}")
+            searched = bool(result and result.get("nearest_searched"))
             await _safe_send(
                 bot, user_id,
-                "🛑 منطقهٔ مورد نظر شما در سایت اداره امور مالیاتی، ارزش منطقه‌ای ثبت نشده است.",
+                "🛑 برای نقطهٔ انتخاب‌شده در سایت اداره امور مالیاتی ارزش منطقه‌ای ثبت نشده است"
+                + ("، و در محدودهٔ اطراف آن در همین شهر هم بلوک دارای ارزش پیدا نشد.\n"
+                   "لطفاً موقعیت را روی نقشه دقیق‌تر (روی خود ملک یا خیابان اصلی مجاور) انتخاب کنید."
+                   if searched else "."),
                 reply_markup=get_main_menu_kb(user_id),
             )
             return
@@ -2253,6 +2262,10 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
                 age=data.get("rv_bld_age") or 0,
             )
         calc = ayani_calc.compute_all(land, building, land_share=land_share, building_share=bld_share)
+        nearest = (result or {}).get("nearest")
+        if nearest:
+            calc["location_note"] = _nearest_note(nearest, tax_result)
+            db.log_event("nearest_block", user_id, f"{province} | {nearest.get('distance_m')}m")
         if _share_needs_detail(data.get("rv_share_arse_links")):
             calc["land_share_desc"] = osh.describe_chain(data["rv_share_arse_links"])
         bld_links = (data.get("rv_share_aayan_links") if data.get("rv_share_same") is False
@@ -2288,6 +2301,7 @@ async def _process_query_result(bot: Bot, user_id: int, data: dict, result, refu
             f"📊 *نتیجهٔ محاسبهٔ ارزش منطقه‌ای*\n\n"
             f"📍 {province} — {county_label}\n\n"
             f"{_result_values_text(calc, bold=True)}"
+            + (f"\n\nℹ️ {calc['location_note']}" if calc.get("location_note") else "")
             + (f"\n\n🔖 کد رهگیری: {code}" if code else ""),
         )
 
@@ -2501,6 +2515,18 @@ async def _query_retry_worker(bot: Bot, user_id: int, data: dict, refund_credit:
         "⚠️ متأسفانه سامانهٔ استعلام مالیاتی پس از چند بار تلاش همچنان پاسخ نمی‌دهد و موضوع به "
         "پشتیبانی اطلاع داده شد. لطفاً کمی بعد دوباره استعلام بگیرید.",
     )
+
+
+def _nearest_note(nearest: dict, tax_result: dict) -> str:
+    """توضیح شفاف برای پیام و PDF وقتی ارزش از نزدیک‌ترین بلوک مجاور گرفته شده است."""
+    st = (tax_result or {}).get("فیلدهای_ساختاریافته", {}) or {}
+    block = st.get("شماره بلوک بر اساس دفترچه ارزش معاملاتی ملک")
+    row = st.get("شماره ردیف بر اساس دفترچه ارزش معاملاتی ملک")
+    city = nearest.get("city")
+    ref = "، ".join(x for x in (f"بلوک {block}" if block else "", f"ردیف {row}" if row else "") if x)
+    return ("برای نقطهٔ دقیق ملک در سامانهٔ مالیاتی ارزش ثبت نشده بود؛ ارزش عرصه از نزدیک‌ترین "
+            f"بلوک دارای ارزش{' در شهر ' + city if city else ''} به فاصلهٔ حدود "
+            f"{int(nearest.get('distance_m') or 0):,} متر{' (' + ref + ')' if ref else ''} محاسبه شده است.")
 
 
 def _do_query_sync(province: str, address: str, lat, lng):
