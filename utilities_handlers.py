@@ -138,6 +138,15 @@ def _fmt(n: int) -> str:
     return f"{n:,}"
 
 
+AMOUNT_HINT = "(می‌توانید سه‌رقم‌سه‌رقم جدا کنید — مثال: 258.000.000)"
+AMOUNT_ERROR = "⚠️ مبلغ را فقط به‌صورت عدد و به *ریال* وارد کنید؛ جدا کردن سه‌رقم‌سه‌رقم مجاز است (مثال: 258.000.000):"
+
+
+def _amount_line(amount: int) -> str:
+    """تأیید مبلغ به ریال و تومان همراه سؤال بعدی؛ اگر اشتباه است کاربر «بازگشت» می‌زند."""
+    return dc.amount_confirm_line(amount, BACK_TEXT) + "\n\n"
+
+
 def _jdate(t) -> str:
     return f"{t[0]:04d}/{t[1]:02d}/{t[2]:02d}"
 
@@ -374,10 +383,12 @@ async def damages_type(message: Message, state: FSMContext):
     if not await _gate(message, state, "damages"):
         return
     if text == DMG_LATE_TEXT:
-        await message.answer("💸 مبلغ اصل خواسته (مبلغ چک/سفته/بدهی) را به *ریال* وارد کنید:", reply_markup=back_kb)
+        await message.answer("💸 مبلغ اصل خواسته (مبلغ چک/سفته/بدهی) را به *ریال* وارد کنید:\n" + AMOUNT_HINT,
+                             reply_markup=back_kb)
         await state.set_state(UtilForm.dmg_amount)
     else:
-        await message.answer("💍 مبلغ مهریهٔ مندرج در عقدنامه را به *ریال* وارد کنید:", reply_markup=back_kb)
+        await message.answer("💍 مبلغ مهریهٔ مندرج در عقدنامه را به *ریال* وارد کنید:\n" + AMOUNT_HINT,
+                             reply_markup=back_kb)
         await state.set_state(UtilForm.mahr_amount)
 
 
@@ -392,10 +403,11 @@ async def dmg_amount(message: Message, state: FSMContext):
         return
     amount = dc.parse_amount(text)
     if not amount:
-        await message.answer("⚠️ مبلغ را فقط به‌صورت عدد و به ریال وارد کنید (مثال: 500000000):")
+        await message.answer(AMOUNT_ERROR)
         return
     await state.update_data(dmg_amount=amount)
-    await message.answer("📅 تاریخ سررسید را به شمسی وارد کنید (مثال: 1402/08/15):", reply_markup=back_kb)
+    await message.answer(_amount_line(amount) + "📅 تاریخ سررسید را به شمسی وارد کنید (مثال: 1402/08/15):",
+                         reply_markup=back_kb)
     await state.set_state(UtilForm.dmg_due)
 
 
@@ -406,7 +418,7 @@ async def dmg_due(message: Message, state: FSMContext):
         await _to_main(message, state)
         return
     if is_back(text):
-        await message.answer("💸 مبلغ اصل خواسته را به *ریال* وارد کنید:", reply_markup=back_kb)
+        await message.answer("💸 مبلغ اصل خواسته را به *ریال* وارد کنید:\n" + AMOUNT_HINT, reply_markup=back_kb)
         await state.set_state(UtilForm.dmg_amount)
         return
     due = dc.parse_jalali_date(text)
@@ -508,10 +520,11 @@ async def mahr_amount(message: Message, state: FSMContext):
         return
     amount = dc.parse_amount(text)
     if not amount:
-        await message.answer("⚠️ مبلغ را فقط به‌صورت عدد و به ریال وارد کنید:")
+        await message.answer(AMOUNT_ERROR)
         return
     await state.update_data(mahr_amount=amount)
-    await message.answer("📅 سال وقوع عقد را به شمسی وارد کنید (مثال: 1385):", reply_markup=back_kb)
+    await message.answer(_amount_line(amount) + "📅 سال وقوع عقد را به شمسی وارد کنید (مثال: 1385):",
+                         reply_markup=back_kb)
     await state.set_state(UtilForm.mahr_year)
 
 
@@ -522,7 +535,7 @@ async def mahr_year(message: Message, state: FSMContext):
         await _to_main(message, state)
         return
     if is_back(text):
-        await message.answer("💍 مبلغ مهریه را به *ریال* وارد کنید:", reply_markup=back_kb)
+        await message.answer("💍 مبلغ مهریه را به *ریال* وارد کنید:\n" + AMOUNT_HINT, reply_markup=back_kb)
         await state.set_state(UtilForm.mahr_amount)
         return
     raw = dc.normalize_digits(text)
@@ -564,7 +577,8 @@ async def mahr_year(message: Message, state: FSMContext):
 # 🧾 محاسبه هزینه دادرسی
 # ══════════════════════════════════════════════════════════════════
 CF_PROMPT = ("🧾 *محاسبه هزینه دادرسی*\n\n"
-             "💵 بهای خواسته یا محکوم‌به را به *ریال* وارد کنید:\n(فقط عدد — مثال: 500000000)")
+             "💵 بهای خواسته یا محکوم‌به را به *ریال* وارد کنید:\n"
+             "(فقط عدد؛ می‌توانید سه‌رقم‌سه‌رقم جدا کنید — مثال: 258.000.000)")
 
 
 async def court_fee_entry(message: Message, state: FSMContext, prefix: str = ""):
@@ -584,13 +598,13 @@ async def cf_amount(message: Message, state: FSMContext):
         return
     amount = dc.parse_amount(text)
     if not amount:
-        await message.answer("⚠️ مبلغ را فقط به‌صورت عدد و به *ریال* وارد کنید (مثال: 500000000):")
+        await message.answer(AMOUNT_ERROR)
         return
     if not await _gate(message, state, "court_fee"):
         return
     # یک «استفاده» = یک مبلغ؛ دیدن مراحل مختلف دادرسی برای همان مبلغ، استفادهٔ جدید نیست
     await state.update_data(cf_amount=amount, cf_counted=False)
-    await message.answer(f"💵 مبلغ: {amount:,} ریال ({amount // 10:,} تومان)\n\nمرحلهٔ دادرسی را انتخاب کنید:",
+    await message.answer(_amount_line(amount) + "مرحلهٔ دادرسی را انتخاب کنید:",
                          reply_markup=cf_category_kb)
     await state.set_state(UtilForm.cf_category)
 
@@ -652,10 +666,12 @@ async def stamp_type(message: Message, state: FSMContext):
     if not await _gate(message, state, "stamp"):
         return
     if text == STAMP_BY_FEE:
-        await message.answer("💵 لطفاً *مبلغ حق‌الوکاله* را به *ریال* وارد فرمایید:\n(فقط عدد)", reply_markup=back_kb)
+        await message.answer("💵 لطفاً *مبلغ حق‌الوکاله* را به *ریال* وارد فرمایید:\n" + AMOUNT_HINT,
+                             reply_markup=back_kb)
         await state.set_state(UtilForm.stamp_fee)
     else:
-        await message.answer("💵 لطفاً *مبلغ خواسته* را به *ریال* وارد فرمایید:\n(فقط عدد)", reply_markup=back_kb)
+        await message.answer("💵 لطفاً *مبلغ خواسته* را به *ریال* وارد فرمایید:\n" + AMOUNT_HINT,
+                             reply_markup=back_kb)
         await state.set_state(UtilForm.stamp_amount)
 
 
@@ -670,7 +686,7 @@ async def stamp_amount(message: Message, state: FSMContext):
         return
     amount = dc.parse_amount(text)
     if not amount:
-        await message.answer("⚠️ لطفاً مبلغ را به *ریال* وارد کنید (فقط عدد):")
+        await message.answer(AMOUNT_ERROR)
         return
     try:
         result = sd.calculate_stamp_duty(amount)
@@ -678,7 +694,8 @@ async def stamp_amount(message: Message, state: FSMContext):
         await message.answer(f"⚠️ خطا در محاسبه: {e}")
         return
     _used(message.chat.id, "stamp", "claim")
-    await message.answer(f"✅ *نتیجه محاسبه تمبر مالیاتی:*\n\n{sd.format_result_fa(amount, result)}")
+    await message.answer(dc.amount_confirm_line(amount) + "\n\n"
+                         f"✅ *نتیجه محاسبه تمبر مالیاتی:*\n\n{sd.format_result_fa(amount, result)}")
     await stamp_entry(message, state, "برای محاسبهٔ دیگر:\n\n")
 
 
@@ -693,11 +710,11 @@ async def stamp_fee(message: Message, state: FSMContext):
         return
     fee = dc.parse_amount(text)
     if not fee:
-        await message.answer("⚠️ لطفاً مبلغ حق‌الوکاله را به *ریال* وارد کنید (فقط عدد):")
+        await message.answer(AMOUNT_ERROR.replace("مبلغ را", "مبلغ حق‌الوکاله را"))
         return
     result = sd.calculate_stamp_from_lawyer_fee(fee)
     _used(message.chat.id, "stamp", "lawyer_fee")
-    await message.answer(sd.format_lawyer_fee_result_fa(fee, result))
+    await message.answer(dc.amount_confirm_line(fee) + "\n\n" + sd.format_lawyer_fee_result_fa(fee, result))
     await stamp_entry(message, state, "برای محاسبهٔ دیگر:\n\n")
 
 

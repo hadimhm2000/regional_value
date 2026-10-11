@@ -37,6 +37,7 @@ cpi_index.json (در پوشهٔ دادهٔ ربات DATA_DIR، در گیت نی�
 """
 import datetime
 import json
+import re
 import os
 import threading
 
@@ -96,12 +97,43 @@ def parse_jalali_date(text: str) -> tuple[int, int, int] | None:
     return y, m, d
 
 
+# جداکننده‌های هزارگان که کاربران تایپ می‌کنند: 258.000.000 / 258,000,000 / ۲۵۸٬۰۰۰٬۰۰۰ / ۲۵۸ ۰۰۰ ۰۰۰
+_THOUSANDS_SEPS = ".,،٬٫'’_-"
+_AMOUNT_GROUPED = re.compile(r"\d{1,3}(?:[" + re.escape(_THOUSANDS_SEPS) + r"]\d{3})+")
+_AMOUNT_UNITS = ("ریال", "ريال", "rial", "Rial", "RIAL")
+
+
 def parse_amount(text: str) -> int | None:
-    raw = normalize_digits(text or "").replace(",", "").replace("،", "").replace("٬", "")
-    if not raw.isdigit():
+    """
+    مبلغ (ریال) با هر نوع جداکنندهٔ سه‌رقمی یا بدون آن:
+      258000000 | 258.000.000 | 258,000,000 | ۲۵۸٬۰۰۰٬۰۰۰ | ۲۵۸ ۰۰۰ ۰۰۰ | 258.000.000 ریال
+    عدد اعشاری یا گروه‌بندی نامعتبر (مثل 25.5 یا 2.58.000) پذیرفته نمی‌شود.
+    """
+    raw = normalize_digits(text or "")
+    for unit in _AMOUNT_UNITS:
+        raw = raw.replace(unit, "")
+    raw = raw.strip()
+    if raw.isdigit():
+        value = int(raw)
+    elif _AMOUNT_GROUPED.fullmatch(raw):
+        value = int(re.sub(r"\D", "", raw))
+    else:
         return None
-    value = int(raw)
     return value if value > 0 else None
+
+
+def format_dotted(n: int) -> str:
+    """۲۵۸۰۰۰۰۰۰ → «258.000.000» (همان شکلی که کاربران مبلغ را می‌نویسند)."""
+    return f"{n:,}".replace(",", ".")
+
+
+def amount_confirm_line(amount: int, back_text: str = None) -> str:
+    """خط تأیید مبلغ واردشده به ریال و تومان؛ کاربر اگر اشتباه زده باشد فوراً می‌فهمد."""
+    toman = format_dotted(amount // 10) + (f"٫{amount % 10}" if amount % 10 else "")
+    line = f"✅ مبلغ واردشده: *{format_dotted(amount)} ریال* (معادل {toman} تومان)"
+    if back_text:
+        line += f"\n↩️ اگر اشتباه است، «{back_text}» را بزنید."
+    return line
 
 
 # ── دادهٔ شاخص ───────────────────────────────────────────────────────────
