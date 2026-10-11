@@ -9,6 +9,6 @@ jdatetime>=4.1.0
 python-dotenv>=1.0.0
 openpyxl>=3.1.0
 pypdf>=4.0.0
-PyMuPDF>=1.23.0
+PyMuPDF==1.24.9  # همان نسخهٔ ربات اصلی؛ نسخه‌های جدیدتر روی ویندوز سرور خطای DLL می‌دهند
 Pillow>=10.0.0
 numpy>=1.24.0

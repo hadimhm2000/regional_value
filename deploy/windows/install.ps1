@@ -63,15 +63,13 @@ if ($Script:Failed) { Write-Host "`nنصب متوقف شد؛ موارد قرمز
 
 # ─────────────── ۳. پایتون و وابستگی‌ها ───────────────
 Write-Host "`n۳) بررسی venv و پکیج‌ها" -ForegroundColor Cyan
-$check = "import aiogram, aiohttp, requests, bs4, reportlab, arabic_reshaper, bidi, jdatetime, dotenv, openpyxl, pypdf, fitz, PIL, numpy"
-$venvOk = $false
-if (Test-Path $Python) {
-    & $Python -c $check 2>$null
-    $venvOk = ($LASTEXITCODE -eq 0)
-}
-if ($venvOk) { Ok "venv سالم است و همهٔ پکیج‌ها نصب‌اند" }
-else {
-    Warn "venv نیست یا ناقص است (venv کپی‌شده از کامپیوتر دیگر معمولاً روی سرور کار نمی‌کند). ساخت دوباره..."
+$check = "import aiogram, aiohttp, requests, bs4, reportlab, arabic_reshaper, bidi, jdatetime, dotenv, openpyxl, pypdf, PIL, numpy"
+$req = Join-Path $AppDir "requirements.txt"
+$pyRuns = $false
+if (Test-Path $Python) { & $Python -c "import sys" 2>$null; $pyRuns = ($LASTEXITCODE -eq 0) }
+
+if (-not $pyRuns) {
+    Warn "venv نیست یا روی این سرور اجرا نمی‌شود (venv کپی‌شده از کامپیوتر دیگر). ساخت دوباره..."
     $basePy = $null
     foreach ($c in @("py -3", "python")) {
         try { $v = (& cmd /c "$c -c `"import sys;print(sys.executable)`"" 2>$null); if ($LASTEXITCODE -eq 0 -and $v) { $basePy = $v.Trim(); break } } catch {}
@@ -83,10 +81,27 @@ else {
     }
     & $basePy -m venv (Join-Path $AppDir "venv")
     & $Python -m pip install --upgrade pip -q
-    & $Python -m pip install -r (Join-Path $AppDir "requirements.txt") -q
-    & $Python -c $check
-    if ($LASTEXITCODE -ne 0) { Fail "نصب پکیج‌ها ناموفق بود (اینترنت/دسترسی به PyPI را بررسی کنید)."; exit 1 }
-    Ok "venv ساخته و پکیج‌ها نصب شد"
+}
+
+# نصب/تعمیر پکیج‌ها طبق requirements.txt (venv موجود حفظ می‌شود)
+& $Python -m pip install -r $req -q --disable-pip-version-check
+& $Python -c $check
+if ($LASTEXITCODE -ne 0) { Fail "پکیج‌های اصلی نصب نشدند (اینترنت/دسترسی به PyPI را بررسی کنید)."; exit 1 }
+Ok "پکیج‌های اصلی نصب‌اند"
+
+# PyMuPDF فقط برای ابزارهای PDF خدمات کاربردی و شاخص تورم لازم است؛ نبودش جلوی اجرای ربات را نمی‌گیرد
+& $Python -c "import fitz" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Warn "PyMuPDF بارگذاری نشد؛ نصب دوبارهٔ نسخهٔ 1.24.9 (همان نسخهٔ ربات اصلی)..."
+    & $Python -m pip uninstall -y PyMuPDF PyMuPDFb pymupdf -q
+    & $Python -m pip install "PyMuPDF==1.24.9" "PyMuPDFb==1.24.9" --no-cache-dir -q --disable-pip-version-check
+    & $Python -c "import fitz" 2>$null
+}
+if ($LASTEXITCODE -eq 0) { Ok "PyMuPDF سالم است" }
+else {
+    Warn "PyMuPDF هنوز کار نمی‌کند (معمولاً به‌خاطر نبود Visual C++ Redistributable)."
+    Warn "ربات اجرا می‌شود، فقط ابزارهای PDF بخش خدمات کاربردی خطا می‌دهند. برای رفع:"
+    Write-Host "     https://aka.ms/vs/17/release/vc_redist.x64.exe  را نصب و سپس این اسکریپت را دوباره اجرا کنید."
 }
 & $Python -m py_compile (Join-Path $AppDir "main.py")
 if ($LASTEXITCODE -ne 0) { Fail "main.py خطای نحوی دارد."; exit 1 }
