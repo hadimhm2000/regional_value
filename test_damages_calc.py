@@ -94,6 +94,20 @@ def test_parse_inputs():
     assert dc.parse_amount("۵۰۰,۰۰۰") == 500000
 
 
+def test_parse_amount_thousand_separators():
+    for text in ("258.000.000", "258,000,000", "۲۵۸٬۰۰۰٬۰۰۰", "۲۵۸.۰۰۰.۰۰۰", "۲۵۸ ۰۰۰ ۰۰۰",
+                 "258000000", "258.000.000 ریال", "٢٥٨،٠٠٠،٠٠٠"):
+        assert dc.parse_amount(text) == 258_000_000, text
+    for text in ("25.5", "2.58.000", "12,5", "0", "", "abc", "-5", "1.0000"):
+        assert dc.parse_amount(text) is None, text
+
+
+def test_amount_confirm_line():
+    line = dc.amount_confirm_line(258_000_000, "🔙 بازگشت")
+    assert "258.000.000 ریال" in line and "25.800.000 تومان" in line and "بازگشت" in line
+    assert "123٫4 تومان" in dc.amount_confirm_line(1234)
+
+
 def test_fetcher_link_helpers():
     html = '<a href="/simplelist/2000.aspx">سال ۱۴۰۵</a><a href="/about.aspx">درباره</a>'
     links = cpi_fetcher._links(html, cpi_fetcher.CBI_LIST_URL)

@@ -20,6 +20,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import access_control
+import damages_calc as dc
 import diyeh_calc as dyc
 import inheritance_calc as ic
 from utilities_handlers import (BACK_TEXT, ENTRY, MAIN_MENU_TEXT, UtilForm, _back_to_menu, _fa, _gate,
@@ -578,7 +579,7 @@ async def inh_board_text(message: Message, state: FSMContext):
 
 async def _ask_estate(message: Message, state: FSMContext):
     await message.answer("🏦 ارزش ترکه را به *ریال* وارد کنید تا سهم هر وارث به ریال هم محاسبه شود، "
-                         f"یا «{SKIP_ESTATE}» را بزنید:",
+                         f"یا «{SKIP_ESTATE}» را بزنید:\n(می‌توانید سه‌رقم‌سه‌رقم جدا کنید — مثال: 258.000.000)",
                          reply_markup=_kb([[SKIP_ESTATE], [BACK_TEXT, MAIN_MENU_TEXT]]))
     await state.set_state(UtilForm.inh_estate)
 
@@ -594,9 +595,10 @@ async def inh_estate(message: Message, state: FSMContext):
         return
     estate = None
     if text != SKIP_ESTATE:
-        estate = _to_int(text)
+        estate = dc.parse_amount(text)
         if not estate:
-            await message.answer(f"⚠️ مبلغ را فقط به‌صورت عدد (ریال) وارد کنید یا «{SKIP_ESTATE}» را بزنید.")
+            await message.answer(f"⚠️ مبلغ را فقط به‌صورت عدد (ریال) وارد کنید — جدا کردن سه‌رقم‌سه‌رقم مجاز است "
+                                 f"(مثال: 258.000.000) — یا «{SKIP_ESTATE}» را بزنید.")
             return
     if not await _gate(message, state, "inheritance"):
         return
@@ -608,7 +610,7 @@ async def inh_estate(message: Message, state: FSMContext):
         await _show_board(message, state, new=True)
         return
     _used(message.chat.id, "inheritance", inh["marital"])
-    await message.answer(ic.format_result_fa(r))
+    await message.answer((dc.amount_confirm_line(estate) + "\n\n" if estate else "") + ic.format_result_fa(r))
     import legal_pdf
     issuer = access_control.issuer_line(message.chat.id)
     await _send_pdf(message, lambda p: legal_pdf.build_inheritance_pdf(p, r, issuer=issuer), "سهم_الارث.pdf",
