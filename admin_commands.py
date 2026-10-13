@@ -14,6 +14,7 @@ admin_commands.py — دستورهای مدیریتی، فقط برای ADMIN_ID
 /subs_excel             — اکسل همهٔ مشترکان (با نام و کد دفتر)؛ ارسال اکسل ویرایش‌شده = افزودن/تغییر اشتراک‌ها (با تایید)
 /diyeh_rate [سال مبلغ]  — نمایش/ثبت مبلغ دیهٔ کامل سال (ریال)
 /office <آیدی> <کد دفتر> <نام دفتر> — ثبت نام و کد دفتر خدمات قضایی برای یک آیدی
+/freeall <روز>          — رایگان شدن همهٔ بخش‌ها برای همه به مدت چند روز؛ /freeall off پایان؛ /freeall وضعیت
 /admin                  — فهرست همهٔ دستورهای مدیر
 (پیام همگانی، کد تخفیف، بکاپ، وضعیت سامانهٔ مالیاتی و پشتیبانی: ops_handlers.py)
 دکمه‌های «✅ تایید / ❌ رد» زیر پیام درخواست تست — تایید = ۲ استعلام رایگان
@@ -612,6 +613,7 @@ ADMIN_HELP = """🛠 دستورهای مدیر
 /credit آیدی تعداد — استعلام رایگان
 /subs_excel — اکسل مشترکان (ارسال اکسل ویرایش‌شده = اعمال)
 /office آیدی کد_دفتر نام دفتر — ثبت دفتر
+/freeall روز — ربات برای همه رایگان به مدت چند روز (/freeall off پایان، /freeall وضعیت)
 
 📊 آمار و نرخ‌ها
 /stats — آمار استفاده و فروش
@@ -637,6 +639,99 @@ ADMIN_HELP = """🛠 دستورهای مدیر
 /taxstatus — وضعیت سامانهٔ مالیاتی
 /taxcheck — بررسی فوری سامانه
 /maptest — آزمایش نقشهٔ نشان در PDF"""
+
+
+# ══════════════════════════════════════════════════════════════════
+# 🎉 دورهٔ رایگان همگانی
+# ══════════════════════════════════════════════════════════════════
+FREEALL_USAGE = ("🎉 *دورهٔ رایگان همگانی*\n"
+                 "/freeall 7 — از همین لحظه تا ۷ روز، ربات برای همه (هر آیدی) رایگان است\n"
+                 "/freeall off — پایان فوری دورهٔ رایگان\n"
+                 "/freeall — نمایش وضعیت")
+
+
+def _freeall_announce_text(until: float) -> str:
+    from menu_handlers import fa_date
+    return ("🎉 *خبر خوب!*\n\n"
+            f"استفاده از همهٔ خدمات ربات (استعلام ارزش منطقه‌ای و خدمات کاربردی) تا تاریخ *{fa_date(until)}* "
+            "برای همه *رایگان* است.\n\n"
+            "همین حالا از منوی ربات استفاده کنید.")
+
+
+@admin_router.message(Command("freeall"))
+async def cmd_freeall(message: Message):
+    if not _is_admin(message):
+        return
+    from menu_handlers import fa_date
+    import db
+    parts = (message.text or "").split()
+    arg = parts[1].translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")).lower() \
+        if len(parts) > 1 else ""
+
+    if not arg:
+        until = access_control.free_for_all_until()
+        if until:
+            left_h = (until - time.time()) / 3600
+            left = f"{int(left_h // 24)} روز و {int(left_h % 24)} ساعت"
+            await message.answer(f"✅ دورهٔ رایگان همگانی فعال است تا *{fa_date(until, with_time=True)}* "
+                                 f"(باقی‌مانده: {left}).\n\n" + FREEALL_USAGE)
+        else:
+            await message.answer("⛔️ دورهٔ رایگان همگانی فعال نیست.\n\n" + FREEALL_USAGE)
+        return
+
+    if arg in ("off", "stop", "0", "لغو", "پایان"):
+        was = access_control.stop_free_for_all()
+        db.log_event("free_all_off", message.from_user.id)
+        await message.answer("⏹ دورهٔ رایگان همگانی پایان یافت؛ دسترسی کاربران مثل قبل (اشتراک/اعتبار) است."
+                             if was else "ℹ️ دورهٔ رایگان همگانی فعال نبود.")
+        return
+
+    if not arg.isdigit() or not (1 <= int(arg) <= 365):
+        await message.answer("⚠️ تعداد روز باید عددی بین ۱ تا ۳۶۵ باشد.\n\n" + FREEALL_USAGE)
+        return
+
+    days = int(arg)
+    was_active = access_control.is_free_for_all()
+    until = access_control.set_free_for_all(days)
+    db.log_event("free_all_on", message.from_user.id, str(days))
+    n_users = db.query_one("SELECT COUNT(*) AS n FROM users WHERE blocked=0")["n"]
+    await message.answer(
+        ("🔄 دورهٔ رایگان همگانی تغییر کرد.\n" if was_active else "✅ دورهٔ رایگان همگانی فعال شد.\n")
+        + f"⏳ از همین لحظه به مدت {days} روز — تا *{fa_date(until, with_time=True)}*\n\n"
+        "در این مدت هر کسی وارد ربات شود، بدون اشتراک و بدون محدودیت از همهٔ بخش‌ها "
+        "(استعلام ارزش منطقه‌ای و خدمات کاربردی) استفاده می‌کند. پس از پایان، دسترسی‌ها خودکار "
+        "مثل قبل می‌شود و به شما اطلاع داده می‌شود.\n\n"
+        "📢 به همهٔ کاربران اطلاع داده شود؟",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"📢 اطلاع به همه ({n_users} نفر)", callback_data="freeall:announce"),
+            InlineKeyboardButton(text="🔕 نه", callback_data="freeall:quiet")]]))
+
+
+@admin_router.callback_query(F.data.in_({"freeall:announce", "freeall:quiet"}))
+async def cb_freeall_announce(callback: CallbackQuery):
+    if ADMIN_ID is None or callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if callback.data == "freeall:quiet":
+        return
+    until = access_control.free_for_all_until()
+    if not until:
+        await callback.message.answer("⛔️ دورهٔ رایگان همگانی دیگر فعال نیست؛ پیامی ارسال نشد.")
+        return
+    import asyncio
+    import ops
+    from ops_handlers import run_broadcast, _broadcast_tasks
+    users = ops.segment_users("all")
+    await callback.message.answer(f"📤 اطلاع‌رسانی برای {len(users)} نفر شروع شد؛ در پایان گزارش داده می‌شود.")
+    task = asyncio.create_task(run_broadcast(callback.bot, users, {"text": _freeall_announce_text(until)},
+                                             callback.from_user.id))
+    _broadcast_tasks.add(task)
+    task.add_done_callback(_broadcast_tasks.discard)
 
 
 @admin_router.message(Command("admin"))
