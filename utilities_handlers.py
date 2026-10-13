@@ -194,6 +194,9 @@ def _plans_text() -> str:
 
 async def _status_line(user_id: int, tool: str) -> str:
     access = await access_control.util_access(user_id, tool)
+    if access == "free_period":
+        from menu_handlers import fa_date
+        return f"🎉 استفاده تا {fa_date(access_control.free_for_all_until())} برای همه رایگان است.\n\n"
     if access == "subscribed":
         sub = await access_control.get_own_subscription(user_id, "util")
         from menu_handlers import fa_date
@@ -241,8 +244,12 @@ async def _show_menu(message: Message, state: FSMContext, prefix: str = ""):
     uid = message.chat.id
     approved = await access_control.is_approved(uid)
     sub = await access_control.get_own_subscription(uid, "util")
+    free_until = access_control.free_for_all_until()
     if approved:
         status = "✅ دسترسی رایگان دائمی"
+    elif free_until:
+        from menu_handlers import fa_date
+        status = f"🎉 همهٔ بخش‌ها تا {fa_date(free_until)} برای همه رایگان است"
     elif sub:
         from menu_handlers import fa_date
         status = f"✅ اشتراک خدمات کاربردی فعال تا {fa_date(sub['expires_at'])}"

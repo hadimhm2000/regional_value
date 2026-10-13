@@ -44,6 +44,59 @@ async def list_approved() -> list:
 
 
 # ══════════════════════════════════════════════════════════════════
+# دورهٔ رایگان همگانی (دستور /freeall ادمین): همهٔ کاربران، همهٔ بخش‌ها
+# ══════════════════════════════════════════════════════════════════
+FREE_ALL_KEY = "free_all_until"
+FREE_ALL_NOTIFIED_KEY = "free_all_end_notified"
+
+
+def free_for_all_until():
+    """زمان پایان دورهٔ رایگان همگانی (timestamp) اگر الان فعال است، وگرنه None."""
+    try:
+        until = float(db.kv_get(FREE_ALL_KEY) or 0)
+    except (TypeError, ValueError):
+        return None
+    return until if until > time.time() else None
+
+
+def is_free_for_all() -> bool:
+    return free_for_all_until() is not None
+
+
+def set_free_for_all(days: float) -> float:
+    """شروع/تغییر دورهٔ رایگان همگانی از همین لحظه به مدت days روز؛ خروجی: زمان پایان."""
+    until = time.time() + float(days) * 86400
+    db.kv_set(FREE_ALL_KEY, until)
+    db.kv_set(FREE_ALL_NOTIFIED_KEY, None)
+    logger.info(f"[ACCESS] دورهٔ رایگان همگانی تا {until} ({days} روز) فعال شد")
+    return until
+
+
+def stop_free_for_all() -> bool:
+    """پایان فوری دورهٔ رایگان همگانی. True اگر فعال بود."""
+    was = is_free_for_all()
+    db.kv_set(FREE_ALL_KEY, None)
+    db.kv_set(FREE_ALL_NOTIFIED_KEY, "1")
+    if was:
+        logger.info("[ACCESS] دورهٔ رایگان همگانی به دستور ادمین پایان یافت")
+    return was
+
+
+def free_for_all_just_ended() -> bool:
+    """یک بار True می‌شود وقتی دورهٔ رایگان همگانی خودبه‌خود تمام شده (برای اطلاع به ادمین)."""
+    raw = db.kv_get(FREE_ALL_KEY)
+    if not raw or db.kv_get(FREE_ALL_NOTIFIED_KEY):
+        return False
+    try:
+        ended = float(raw) <= time.time()
+    except (TypeError, ValueError):
+        return False
+    if ended:
+        db.kv_set(FREE_ALL_NOTIFIED_KEY, "1")
+    return ended
+
+
+# ══════════════════════════════════════════════════════════════════
 # اعتبار استعلام رایگان (تست + جبران خطای سیستمی)
 # ══════════════════════════════════════════════════════════════════
 async def grant_free_retry(user_id: int, count: int = 1) -> None:
@@ -163,10 +216,12 @@ def util_free_left(user_id: int, tool: str) -> int:
 async def util_access(user_id: int, tool: str) -> str:
     """
     وضعیت دسترسی به یک بخش خدمات کاربردی:
-      "free_user" (تاییدشدهٔ ادمین) | "subscribed" | "free_credit" | "none"
+      "free_user" (تاییدشدهٔ ادمین) | "free_period" (رایگان همگانی) | "subscribed" | "free_credit" | "none"
     """
     if await is_approved(user_id):
         return "free_user"
+    if is_free_for_all():
+        return "free_period"
     if _own_subscription(user_id, "util"):
         return "subscribed"
     if util_free_left(user_id, tool) > 0:

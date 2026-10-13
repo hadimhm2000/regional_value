@@ -681,6 +681,10 @@ async def ops_loop(bot: Bot, tick: int = 60):
             if ops.tax_is_down() and now - last_probe >= TAX_PROBE_INTERVAL:
                 last_probe = now
                 await tax_probe(bot)
+            if ADMIN_ID and access_control.free_for_all_just_ended():
+                await bot.send_message(ADMIN_ID, "⏰ دورهٔ رایگان همگانی به پایان رسید؛ از این لحظه "
+                                                 "دسترسی کاربران مثل قبل (اشتراک/اعتبار) است.\n"
+                                                 "برای شروع دوباره: /freeall تعداد_روز")
             if now - last_followup >= 3600:
                 last_followup = now
                 n = await send_trial_followups(bot)

@@ -480,8 +480,14 @@ async def _send_account(message: Message, uid: int):
         lines.append(f"🏢 دفتر: {office['office_name']}")
     if office.get("office_code"):
         lines.append(f"🔢 کد دفتر: {office['office_code']}")
+    free_until = access_control.free_for_all_until()
     if approved:
         lines.append("✅ دسترسی: رایگان و دائمی (تایید مدیر سامانه)")
+    elif free_until:
+        lines.append(f"🎉 دورهٔ رایگان همگانی: همهٔ بخش‌ها تا {fa_date(free_until)} "
+                     f"({_fa(_days_left(free_until))} روز باقی‌مانده) برای همه رایگان است.")
+        if own:
+            lines.append(f"💳 {access_control.plan_title(own['plan'])}: فعال تا {fa_date(own['expires_at'])}")
     elif own:
         lines.append(f"💳 {access_control.plan_title(own['plan'])}: فعال تا {fa_date(own['expires_at'])} "
                      f"({_fa(_days_left(own['expires_at']))} روز باقی‌مانده)")

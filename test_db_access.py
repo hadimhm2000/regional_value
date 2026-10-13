@@ -175,3 +175,42 @@ def test_issuer_line():
     assert ac.issuer_line(1) == "صادرکننده: دفتر خدمات الکترونیک قضایی شمارهٔ ۱۲ تهران — کد 4321"
     ac.set_office_info(2, office_name="دفتر خدمات قضایی آرمان", office_code="99")
     assert ac.issuer_line(2) == "صادرکننده: دفتر خدمات قضایی آرمان — کد 99"
+
+
+# ══════════════════════════════════════════════════════════════════
+# دورهٔ رایگان همگانی (/freeall)
+# ══════════════════════════════════════════════════════════════════
+def test_free_for_all_period():
+    uid = 777001
+    assert not ac.is_free_for_all()
+    assert run(ac.util_access(uid, "court_fee")) == "free_credit"
+    until = ac.set_free_for_all(3)
+    assert abs(until - (time.time() + 3 * 86400)) < 5
+    assert ac.is_free_for_all() and ac.free_for_all_until() == until
+    for tool in ("court_fee", "stamp", "damages"):
+        ac.record_util_use(uid, tool)
+        ac.record_util_use(uid, tool)            # بیش از سهم رایگان
+        assert run(ac.util_access(uid, tool)) == "free_period"
+    assert not ac.free_for_all_just_ended()
+    assert ac.stop_free_for_all() is True
+    assert not ac.is_free_for_all()
+    assert run(ac.util_access(uid, "court_fee")) == "none"
+    assert ac.stop_free_for_all() is False
+
+
+def test_free_for_all_expires_and_notifies_once():
+    ac.set_free_for_all(1)
+    db.kv_set(ac.FREE_ALL_KEY, time.time() - 1)   # پایان خودکار
+    assert not ac.is_free_for_all()
+    assert ac.free_for_all_just_ended() is True
+    assert ac.free_for_all_just_ended() is False  # فقط یک بار اطلاع
+    ac.set_free_for_all(2)                        # دورهٔ جدید → دوباره قابل اطلاع
+    db.kv_set(ac.FREE_ALL_KEY, time.time() - 1)
+    assert ac.free_for_all_just_ended() is True
+
+
+def test_free_for_all_does_not_change_approved_or_subscription():
+    run(ac.approve_user(5))
+    ac.set_free_for_all(1)
+    assert run(ac.util_access(5, "stamp")) == "free_user"
+    assert run(ac.get_subscription(6)) is None    # اشتراکی ساخته نمی‌شود

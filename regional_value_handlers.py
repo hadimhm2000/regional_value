@@ -1735,8 +1735,10 @@ def _form_complete(data: dict) -> bool:
 
 
 async def _has_free_access(user_id: int) -> bool:
-    """کاربر رایگانِ ادمین یا مشترک فعال."""
+    """کاربر رایگانِ ادمین، دورهٔ رایگان همگانی یا مشترک فعال."""
     try:
+        if access_control.is_free_for_all():
+            return True
         if await access_control.is_approved(user_id):
             return True
         return await access_control.get_subscription(user_id) is not None
