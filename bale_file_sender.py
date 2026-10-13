@@ -10,12 +10,32 @@ FSInputFile در aiogram با API بله ناسازگار است و خطای
 import json
 import logging
 import os
+import ssl
 
 import aiohttp
+
+try:
+    import certifi
+except ImportError:  # certifi همراه requests نصب می‌شود؛ این فقط احتیاط است
+    certifi = None
 
 from config import BOT_TOKEN, BALE_API_BASE
 
 logger = logging.getLogger(__name__)
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """
+    کانتکست TLS با بررسی کامل گواهی. بسته‌ی certifi استفاده می‌شود تا روی ویندوز سرور
+    به مخزن گواهی سیستم وابسته نباشیم. قبلاً ssl=False بود که توکن ربات (داخل URL) و
+    توکن کیف‌پول (داخل فاکتور) را در برابر شنود میانی (MITM) بی‌دفاع می‌گذاشت.
+    """
+    if certifi is not None:
+        return ssl.create_default_context(cafile=certifi.where())
+    return ssl.create_default_context()
+
+
+_SSL = _ssl_context()
 
 
 def _api_url(method: str) -> str:
@@ -88,7 +108,7 @@ async def _send_document_once(
                 "document", file_bytes, filename=filename, content_type="application/octet-stream"
             )
             async with session.post(
-                url, data=data, timeout=aiohttp.ClientTimeout(total=60), ssl=False
+                url, data=data, timeout=aiohttp.ClientTimeout(total=60), ssl=_SSL
             ) as resp:
                 result = await resp.json()
                 if result.get("ok"):
@@ -120,7 +140,7 @@ async def send_photo_direct(chat_id: int, file_path: str, caption: str = None, r
                 data.add_field("reply_markup", rm_json)
             data.add_field("photo", file_bytes, filename=os.path.basename(file_path), content_type="image/jpeg")
             async with session.post(
-                url, data=data, timeout=aiohttp.ClientTimeout(total=60), ssl=False
+                url, data=data, timeout=aiohttp.ClientTimeout(total=60), ssl=_SSL
             ) as resp:
                 result = await resp.json()
                 if result.get("ok"):
@@ -152,7 +172,7 @@ async def send_invoice(
         "prices": prices,
     }
     try:
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=_SSL)) as session:
             async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 result = await resp.json()
                 if result.get("ok"):

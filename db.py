@@ -141,6 +141,12 @@ CREATE TABLE IF NOT EXISTS discount_uses (
     used_at     REAL NOT NULL,
     PRIMARY KEY (code, user_id)
 );
+CREATE TABLE IF NOT EXISTS discount_holds (        -- رزرو موقت کد تخفیف بین pre_checkout و پرداخت موفق
+    code        TEXT NOT NULL,
+    user_id     INTEGER NOT NULL,
+    expires_at  REAL NOT NULL,
+    PRIMARY KEY (code, user_id)
+);
 CREATE TABLE IF NOT EXISTS followups (             -- پیام‌های پیگیری خودکار (هر نوع یک بار برای هر کاربر)
     user_id     INTEGER NOT NULL,
     kind        TEXT NOT NULL,

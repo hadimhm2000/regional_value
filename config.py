@@ -69,6 +69,12 @@ TRIAL_CREDITS = int(os.environ.get("TRIAL_CREDITS", "2"))
 # زیر بار سنگین کاربران زیاد)
 MAX_CONCURRENT_QUERIES = int(os.environ.get("MAX_CONCURRENT_QUERIES", "10"))
 
+# ═══ محدودیت نرخ درخواست هر کاربر (rate_limit.py) ═══
+# حداکثر پیام / کلیک دکمه در هر RATE_LIMIT_WINDOW ثانیه؛ ۰ = بدون محدودیت. ادمین معاف است.
+RATE_LIMIT_MESSAGES = int(os.environ.get("RATE_LIMIT_MESSAGES", "20"))
+RATE_LIMIT_CALLBACKS = int(os.environ.get("RATE_LIMIT_CALLBACKS", "30"))
+RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
+
 # تعداد thread workerهای اجرای درخواست‌های شبکه‌ای بلاک‌کننده (requests)
 EXECUTOR_MAX_WORKERS = int(os.environ.get("EXECUTOR_MAX_WORKERS", "20"))
 

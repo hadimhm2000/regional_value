@@ -62,12 +62,10 @@ def get(code: str):
     return dict(r) if r else None
 
 
-def validate(code: str, user_id: int, product: str) -> dict:
-    """کد معتبر برای این کاربر و محصول؟ خروجی: رکورد کد؛ وگرنه DiscountError با پیام مناسب."""
-    d = get(code)
+def _check(d, user_id: int, product: str, now: float) -> None:
     if not d or not d["active"]:
         raise DiscountError("کد تخفیف معتبر نیست.")
-    if d["expires_at"] and d["expires_at"] < time.time():
+    if d["expires_at"] and d["expires_at"] < now:
         raise DiscountError("مهلت استفاده از این کد تخفیف تمام شده است.")
     if d["product"] not in ("all", product):
         raise DiscountError(f"این کد فقط برای اشتراک «{PRODUCTS[d['product']]}» است.")
@@ -75,9 +73,53 @@ def validate(code: str, user_id: int, product: str) -> dict:
         raise DiscountError("این کد تخفیف مخصوص کاربر دیگری است.")
     if d["max_uses"] and d["used"] >= d["max_uses"]:
         raise DiscountError("ظرفیت استفاده از این کد تخفیف تکمیل شده است.")
+
+
+def validate(code: str, user_id: int, product: str) -> dict:
+    """کد معتبر برای این کاربر و محصول؟ خروجی: رکورد کد؛ وگرنه DiscountError با پیام مناسب."""
+    d = get(code)
+    _check(d, user_id, product, time.time())
     if db.query_one("SELECT 1 FROM discount_uses WHERE code=? AND user_id=?", (d["code"], int(user_id))):
         raise DiscountError("شما قبلاً از این کد تخفیف استفاده کرده‌اید.")
     return d
+
+
+# مدت رزرو کد بین تایید pre_checkout و رسیدن پرداخت موفق (ثانیه)
+HOLD_SECONDS = 180
+
+
+def reserve(code: str, user_id: int, product: str) -> dict:
+    """
+    رزرو اتمیک کد تخفیف در لحظهٔ pre_checkout (قبل از کسر پول).
+
+    بدون رزرو، دو فاکتور هم‌زمان (از یک کاربر یا چند کاربر روی کدی با ظرفیت محدود) هر دو از
+    validate عبور می‌کردند چون استفاده تازه پس از پرداخت ثبت می‌شود. حالا:
+      • تا HOLD_SECONDS ثانیه هیچ پرداخت دیگری از همین کاربر با همین کد پذیرفته نمی‌شود؛
+      • رزروهای فعال دیگران هم جزو ظرفیت (max_uses) حساب می‌شوند.
+    رزرو با record_use (پرداخت موفق) آزاد می‌شود و در غیر این صورت خودش منقضی می‌شود.
+    """
+    code = normalize(code)
+    now = time.time()
+    with db.tx() as c:
+        c.execute("DELETE FROM discount_holds WHERE expires_at <= ?", (now,))
+        r = c.execute("SELECT * FROM discount_codes WHERE code=?", (code,)).fetchone()
+        d = dict(r) if r else None
+        _check(d, user_id, product, now)
+        if c.execute("SELECT 1 FROM discount_uses WHERE code=? AND user_id=?", (code, int(user_id))).fetchone():
+            raise DiscountError("شما قبلاً از این کد تخفیف استفاده کرده‌اید.")
+        if c.execute("SELECT 1 FROM discount_holds WHERE code=? AND user_id=?", (code, int(user_id))).fetchone():
+            raise DiscountError("پرداخت دیگری با این کد تخفیف در حال انجام است؛ چند دقیقهٔ دیگر دوباره تلاش کنید.")
+        if d["max_uses"]:
+            held = c.execute("SELECT COUNT(*) FROM discount_holds WHERE code=?", (code,)).fetchone()[0]
+            if d["used"] + held >= d["max_uses"]:
+                raise DiscountError("ظرفیت استفاده از این کد تخفیف تکمیل شده است.")
+        c.execute("INSERT INTO discount_holds(code, user_id, expires_at) VALUES (?,?,?)",
+                  (code, int(user_id), now + HOLD_SECONDS))
+    return d
+
+
+def release_hold(code: str, user_id: int) -> None:
+    db.execute("DELETE FROM discount_holds WHERE code=? AND user_id=?", (normalize(code), int(user_id)))
 
 
 def discounted_toman(toman: int, percent: int) -> int:
@@ -93,6 +135,7 @@ def record_use(code: str, user_id: int, payment_id: int | None) -> bool:
                       (code, int(user_id), payment_id, time.time())).rowcount
         if n:
             c.execute("UPDATE discount_codes SET used = used + 1 WHERE code=?", (code,))
+        c.execute("DELETE FROM discount_holds WHERE code=? AND user_id=?", (code, int(user_id)))
     return n > 0
 
 

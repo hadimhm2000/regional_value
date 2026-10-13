@@ -26,7 +26,9 @@ from aiogram.types import ErrorEvent
 
 import db
 from config import (BOT_TOKEN, BALE_API_BASE, ADMIN_ID, NESHAN_API_KEY, EXECUTOR_MAX_WORKERS,
-                    RENEW_CHECK_INTERVAL, RENEW_REMIND_DAYS)
+                    RENEW_CHECK_INTERVAL, RENEW_REMIND_DAYS,
+                    RATE_LIMIT_MESSAGES, RATE_LIMIT_CALLBACKS, RATE_LIMIT_WINDOW)
+from rate_limit import RateLimitMiddleware
 from regional_value_handlers import regional_value_router
 from menu_handlers import menu_router, renew_reminder_loop
 from utilities_handlers import utilities_router, cpi_reminder_loop
@@ -75,6 +77,10 @@ async def _timing_middleware(handler, event, data):
 
 # ثبت کاربران (برای پیام همگانی / پیگیری تست)
 dp.update.outer_middleware()(track_users_middleware)
+
+# ═══ محدودیت نرخ درخواست هر کاربر (ضد اسپم/اسکریپت؛ ادمین و پرداخت موفق معاف) ═══
+dp.message.outer_middleware(RateLimitMiddleware(RATE_LIMIT_MESSAGES, RATE_LIMIT_WINDOW, ADMIN_ID))
+dp.callback_query.outer_middleware(RateLimitMiddleware(RATE_LIMIT_CALLBACKS, RATE_LIMIT_WINDOW, ADMIN_ID))
 
 dp.include_router(admin_router)
 # پشتیبانی، پیام همگانی، کد تخفیف، رسیدها، بکاپ، وضعیت سامانهٔ مالیاتی

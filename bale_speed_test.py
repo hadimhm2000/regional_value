@@ -70,7 +70,10 @@ def _ssl_ctx(mode):
 
 
 async def run(label, family, ssl_mode="system"):
-    url = f"{BASE}/bot{TOKEN}/getMe"
+    # در حالت بدون بررسی گواهی، توکن واقعی هرگز فرستاده نمی‌شود (ممکن است وسط مسیر شنود شود)؛
+    # توکن ساختگی پاسخ 401 می‌گیرد ولی زمان رفت‌وبرگشت همان است.
+    token = "0:speedtest-dummy" if ssl_mode == "no-verify" else TOKEN
+    url = f"{BASE}/bot{token}/getMe"
     times, errors = [], 0
     connector = aiohttp.TCPConnector(family=family, ttl_dns_cache=3600, ssl=_ssl_ctx(ssl_mode))
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=30)) as s:

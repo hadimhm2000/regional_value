@@ -63,6 +63,7 @@ from aiogram.types import (
 
 import ayani_calc
 import ownership_share as osh
+import rate_limit
 from config import ADMIN_ID, BOT_USERNAME, MAX_CONCURRENT_QUERIES, SUBSCRIPTION_PLANS, TRIAL_CREDITS
 from tax_geolocation_query import get_province_list, find_land_use_value, extract_all_land_use_values
 import access_control
@@ -1749,6 +1750,9 @@ async def _has_free_access(user_id: int) -> bool:
 
 async def _start_access_flow(message: Message, state: FSMContext, bot: Bot):
     user_id = message.from_user.id
+    if rate_limit.is_busy("rv_query", user_id):
+        await message.answer(rate_limit.BUSY_TEXTS["rv_query"])
+        return
 
     if await _has_free_access(user_id):
         await message.answer("⏳ در حال استعلام ارزش منطقه‌ای... لطفاً چند لحظه صبر کنید.",
@@ -1965,14 +1969,22 @@ async def process_plan(message: Message, state: FSMContext, bot: Bot):
 async def rv_pre_checkout(pre_checkout_query: PreCheckoutQuery, bot: Bot):
     from payment import expected_amount
     payload = parse_payload(getattr(pre_checkout_query, "invoice_payload", ""))
-    expected = expected_amount(payload, pre_checkout_query.from_user.id)
+    user_id = pre_checkout_query.from_user.id
+    expected = expected_amount(payload, user_id)
     ok = expected is not None and getattr(pre_checkout_query, "total_amount", expected) == expected
+    error = "فاکتور نامعتبر است؛ لطفاً دوباره اشتراک را انتخاب کنید."
+    if ok and payload.get("dc"):
+        # رزرو اتمیک کد تخفیف تا دو پرداخت هم‌زمان نتوانند از یک کد (یک‌بارمصرف) استفاده کنند
+        import discounts
+        try:
+            discounts.reserve(payload["dc"], user_id, PAYLOAD_PRODUCT.get(payload.get("type")))
+        except discounts.DiscountError as e:
+            ok, error = False, str(e)
     try:
         if ok:
             await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
         else:
-            await bot.answer_pre_checkout_query(
-                pre_checkout_query.id, ok=False, error_message="فاکتور نامعتبر است؛ لطفاً دوباره اشتراک را انتخاب کنید.")
+            await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=False, error_message=error)
     except Exception as e:
         logger.error(f"[RV-PAYMENT] خطا در answer_pre_checkout_query: {e}")
 
@@ -2098,6 +2110,12 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
     برای یک دقیقهٔ بعد با همان اطلاعات زمان‌بندی شده است.
     """
     user_id = message.from_user.id
+    # هر کاربر فقط یک استعلام هم‌زمان — تا یک نفر کل ظرفیت هم‌زمان را نگیرد
+    if not rate_limit.try_acquire("rv_query", user_id):
+        if refund_credit:   # اعتبار رایگانی که برای این درخواست کم شده بود برگردانده می‌شود
+            await access_control.grant_free_retry(user_id)
+        await _safe_send(bot, user_id, rate_limit.BUSY_TEXTS["rv_query"])
+        return False
     data = copy.deepcopy(await state.get_data())
     try:
         async with _query_semaphore:
@@ -2116,6 +2134,7 @@ async def run_regional_value_query(message: Message, state: FSMContext, bot: Bot
         )
         return True
     finally:
+        rate_limit.release("rv_query", user_id)
         await state.clear()
 
 

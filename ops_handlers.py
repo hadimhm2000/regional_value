@@ -595,11 +595,21 @@ async def send_backup(bot: Bot, chat_id: int) -> bool:
     size = os.path.getsize(path) / 1024 / 1024
     users = db.query_one("SELECT COUNT(*) n FROM users")["n"]
     active = db.query_one("SELECT COUNT(*) n FROM subscriptions WHERE expires_at>?", (time.time(),))["n"]
+    enc = ops.backup_encryption()
+    enc_note = {
+        "aes": "🔐 فایل با رمز BACKUP_PASSWORD (AES-256) رمزگذاری شده است؛ با 7-Zip یا WinRAR باز کنید.",
+        "missing_lib": "⚠️ BACKUP_PASSWORD تنظیم شده ولی بستهٔ pyzipper نصب نیست؛ فایل بدون رمز است. "
+                       "روی سرور اجرا کنید: pip install pyzipper",
+        "off": "⚠️ این فایل رمز ندارد و شامل کدملی و اطلاعات مشترکان است. برای رمزگذاری، BACKUP_PASSWORD "
+               "را در .env تنظیم کنید.",
+    }[enc]
+    if enc == "missing_lib":
+        logger.error("[BACKUP] BACKUP_PASSWORD تنظیم شده ولی pyzipper نصب نیست — پشتیبان بدون رمز ساخته شد")
     ok = await send_document_direct(
         chat_id, path, filename=os.path.basename(path),
         caption=(f"💾 پشتیبان {os.path.basename(path)[7:-4]} — {size:.1f} مگابایت\n"
                  f"👥 کاربران: {_fa(users)} | 💳 مشترکان فعال: {_fa(active)}\n"
-                 "این فایل را در جای امنی نگه دارید (شامل اطلاعات مشترکان است)."))
+                 "این فایل را در جای امنی نگه دارید (شامل اطلاعات مشترکان است).\n" + enc_note))
     if not ok:
         await _notify_admin(bot, f"⚠️ ارسال فایل پشتیبان ({size:.1f} مگابایت) ناموفق بود؛ فایل روی سرور ذخیره شد:\n{path}")
     return ok
