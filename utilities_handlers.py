@@ -37,6 +37,7 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 import access_control
 import court_fee as cf
+import rate_limit
 import damages_calc as dc
 import db
 import stamp_duty as sd
@@ -735,6 +736,21 @@ TALL_PAGE_ASPECT_THRESHOLD = 1.6
 BLANK_ROW_BRIGHTNESS = 250
 MIN_GAP_PX = 25
 MIN_SEGMENT_PX = 150
+# محدودیت‌های ضد فایل مخرب (پرکردن حافظه/CPU سرور)
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "20"))          # حجم فایل ارسالی
+MAX_IMAGE_PIXELS = 50_000_000                                         # عکس ورودی (~۷۰۷۰×۷۰۷۰)
+MAX_PAGE_PIXELS = 12_000_000                                          # هر صفحهٔ رندرشدهٔ PDF
+MAX_TOTAL_RENDER_PIXELS = 160_000_000                                 # جمع پیکسل همهٔ صفحات PDF
+
+
+def _too_big(file_obj) -> bool:
+    """آیا فایل ارسالی (طبق file_size اعلام‌شدهٔ بله) از سقف مجاز بزرگ‌تر است؟"""
+    size = getattr(file_obj, "file_size", None) or 0
+    return size > MAX_UPLOAD_MB * 1024 * 1024
+
+
+def _too_big_text() -> str:
+    return f"⚠️ حجم فایل بیشتر از حد مجاز ({_fa(MAX_UPLOAD_MB)} مگابایت) است؛ لطفاً فایل کوچک‌تری ارسال فرمایید."
 
 
 async def file_tools_entry(message: Message, state: FSMContext, prefix: str = ""):
@@ -772,6 +788,8 @@ def compress_image(src_path: str, dst_path: str, target_kb: int = TARGET_IMAGE_K
     """کاهش تدریجی کیفیت/ابعاد تا حدود target_kb؛ خروجی: حجم نهایی (بایت)."""
     from PIL import Image
     img = Image.open(src_path)
+    if img.width * img.height > MAX_IMAGE_PIXELS:   # قبل از decode کامل بررسی می‌شود (ضد decompression bomb)
+        raise ValueError("ابعاد این عکس بیش از حد بزرگ است؛ لطفاً عکس کوچک‌تری ارسال فرمایید.")
     if img.mode in ("RGBA", "P", "LA", "L"):
         img = img.convert("RGB")
     quality, scale, target = 90, 1.0, target_kb * 1024
@@ -829,8 +847,15 @@ def render_pdf_pages(pdf_path: str, max_pages: int = MAX_PDF_PAGES) -> list:
             n = pdf.page_count
             _check_pages(n, max_pages)
             zoom = 2.0 if n <= 10 else (1.5 if n <= 20 else 1.0)
+            budget = MAX_TOTAL_RENDER_PIXELS
             for i in range(n):
-                pix = pdf.load_page(i).get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                page = pdf.load_page(i)
+                z = _safe_zoom(page.rect.width, page.rect.height, zoom)
+                budget -= int(page.rect.width * z) * int(page.rect.height * z)
+                if budget < 0:
+                    raise ValueError("حجم تصویری صفحات این PDF بیش از حد مجاز است؛ "
+                                     "لطفاً فایل را به بخش‌های کوچک‌تر تقسیم و دوباره ارسال کنید.")
+                pix = page.get_pixmap(matrix=fitz.Matrix(z, z))
                 mode = "RGB" if pix.n < 4 else "RGBA"
                 pages.append(Image.frombytes(mode, (pix.width, pix.height), pix.samples).convert("RGB"))
         finally:
@@ -842,13 +867,29 @@ def render_pdf_pages(pdf_path: str, max_pages: int = MAX_PDF_PAGES) -> list:
             n = len(pdf)
             _check_pages(n, max_pages)
             zoom = 2.0 if n <= 10 else (1.5 if n <= 20 else 1.0)
-            pages = [pdf[i].render(scale=zoom).to_pil().convert("RGB") for i in range(n)]
+            budget = MAX_TOTAL_RENDER_PIXELS
+            for i in range(n):
+                w, h = pdf[i].get_size()
+                z = _safe_zoom(w, h, zoom)
+                budget -= int(w * z) * int(h * z)
+                if budget < 0:
+                    raise ValueError("حجم تصویری صفحات این PDF بیش از حد مجاز است؛ "
+                                     "لطفاً فایل را به بخش‌های کوچک‌تر تقسیم و دوباره ارسال کنید.")
+                pages.append(pdf[i].render(scale=z).to_pil().convert("RGB"))
         finally:
             pdf.close()
     out = []
     for p in pages:
         out += split_tall_page(p)
     return out
+
+
+def _safe_zoom(width: float, height: float, zoom: float) -> float:
+    """کاهش بزرگ‌نمایی برای صفحه‌های غیرعادی بزرگ تا تصویر هر صفحه از MAX_PAGE_PIXELS بیشتر نشود."""
+    area = max(1.0, float(width) * float(height))
+    if area * zoom * zoom <= MAX_PAGE_PIXELS:
+        return zoom
+    return max(0.01, (MAX_PAGE_PIXELS / area) ** 0.5)
 
 
 def _check_pages(n: int, max_pages: int):
@@ -865,6 +906,21 @@ async def ft_image(message: Message, state: FSMContext, bot: Bot):
     if not is_photo and not (message.document and (message.document.mime_type or "").startswith("image/")):
         await message.answer("⚠️ لطفاً یک فایل تصویری (عکس) ارسال فرمایید.")
         return
+    if _too_big(message.photo[-1] if is_photo else message.document):
+        await message.answer(_too_big_text())
+        return
+    # قفل قبل از _gate: تا پردازش این فایل تمام و استفاده ثبت نشده، فایل دیگری پذیرفته نمی‌شود
+    # (جلوگیری از استفادهٔ چندبارهٔ یک اعتبار رایگان با ارسال هم‌زمان چند فایل)
+    if not rate_limit.try_acquire("file_tools", message.chat.id):
+        await message.answer(rate_limit.BUSY_TEXTS["file_tools"])
+        return
+    try:
+        await _ft_image_work(message, state, bot, is_photo)
+    finally:
+        rate_limit.release("file_tools", message.chat.id)
+
+
+async def _ft_image_work(message: Message, state: FSMContext, bot: Bot, is_photo: bool):
     if not await _gate(message, state, "file_tools"):
         return
     from bale_file_sender import send_document_direct
@@ -885,6 +941,8 @@ async def ft_image(message: Message, state: FSMContext, bot: Bot):
             _used(message.chat.id, "file_tools", "compress")
         else:
             await message.answer("❌ ارسال فایل با خطا مواجه شد. لطفاً دوباره تلاش کنید.")
+    except ValueError as e:
+        await message.answer(f"⚠️ {e}")
     except Exception as e:
         logger.error(f"[FILE-TOOLS] خطا در فشرده‌سازی عکس: {e}", exc_info=True)
         await message.answer("❌ خطایی در پردازش عکس رخ داد. لطفاً دوباره تلاش کنید.")
@@ -904,6 +962,19 @@ async def ft_pdf(message: Message, state: FSMContext, bot: Bot):
     if mime != "application/pdf" and not fname.lower().endswith(".pdf"):
         await message.answer("⚠️ لطفاً فقط فایل با فرمت PDF ارسال فرمایید.")
         return
+    if _too_big(message.document):
+        await message.answer(_too_big_text())
+        return
+    if not rate_limit.try_acquire("file_tools", message.chat.id):
+        await message.answer(rate_limit.BUSY_TEXTS["file_tools"])
+        return
+    try:
+        await _ft_pdf_work(message, state, bot)
+    finally:
+        rate_limit.release("file_tools", message.chat.id)
+
+
+async def _ft_pdf_work(message: Message, state: FSMContext, bot: Bot):
     if not await _gate(message, state, "file_tools"):
         return
     from bale_file_sender import send_photo_direct

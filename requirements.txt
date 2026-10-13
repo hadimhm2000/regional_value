@@ -1,6 +1,7 @@
 aiogram>=3.4.0
 aiohttp>=3.9.0
 requests>=2.31.0
+certifi>=2023.7.22
 beautifulsoup4>=4.12.0
 reportlab>=4.0.0
 arabic_reshaper>=3.0.0
@@ -12,3 +13,4 @@ pypdf>=4.0.0
 PyMuPDF==1.24.9  # همان نسخهٔ ربات اصلی؛ نسخه‌های جدیدتر روی ویندوز سرور خطای DLL می‌دهند
 Pillow>=10.0.0
 numpy>=1.24.0
+pyzipper>=0.3.6  # رمزگذاری AES فایل پشتیبان (BACKUP_PASSWORD)

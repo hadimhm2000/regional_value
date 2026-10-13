@@ -58,6 +58,32 @@ def backup_files() -> list:
     return [f for f in files if os.path.isfile(f)]
 
 
+def backup_encryption() -> str:
+    """
+    وضعیت رمزگذاری پشتیبان:
+      "aes"         — BACKUP_PASSWORD تنظیم شده و pyzipper نصب است (zip با AES-256)
+      "missing_lib" — رمز تنظیم شده ولی pyzipper نصب نیست (پشتیبان بدون رمز ساخته می‌شود)
+      "off"         — BACKUP_PASSWORD تنظیم نشده
+    """
+    if not os.environ.get("BACKUP_PASSWORD"):
+        return "off"
+    try:
+        import pyzipper  # noqa: F401
+    except ImportError:
+        return "missing_lib"
+    return "aes"
+
+
+def _open_zip(zip_path: str):
+    """zip رمزدار (AES-256؛ با 7-Zip یا WinRAR باز می‌شود) اگر رمز تنظیم شده باشد، وگرنه zip معمولی."""
+    if backup_encryption() == "aes":
+        import pyzipper
+        z = pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES)
+        z.setpassword(os.environ["BACKUP_PASSWORD"].encode("utf-8"))  # پیش‌فرض WZ_AES کلید ۲۵۶ بیتی است
+        return z
+    return zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED)
+
+
 def make_backup(keep: int = 7) -> str:
     """ساخت DATA_DIR/backups/backup_<تاریخ>.zip؛ نسخه‌های قدیمی‌تر از keep حذف می‌شوند. خروجی: مسیر فایل."""
     from config import DATA_DIR
@@ -68,7 +94,7 @@ def make_backup(keep: int = 7) -> str:
     tmp_db = os.path.join(tempfile.mkdtemp(prefix="rvbk_"), "bot.sqlite3")
     try:
         db.backup_to(tmp_db)
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        with _open_zip(zip_path) as z:
             z.write(tmp_db, "bot.sqlite3")
             for f in backup_files():
                 arc = os.path.relpath(f, DATA_DIR) if f.startswith(DATA_DIR) else os.path.basename(f)
