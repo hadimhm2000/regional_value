@@ -70,6 +70,8 @@ class UtilForm(StatesGroup):
     dmg_calc_date = State()
     mahr_amount = State()
     mahr_year = State()
+    mahr_pay = State()
+    mahr_death = State()
     cf_amount = State()
     cf_category = State()
     stamp_type = State()
@@ -109,6 +111,13 @@ DMG_MAHR_TEXT = "💍 مهریه به نرخ روز"
 DMG_TODAY_TEXT = "📅 محاسبه تا امروز"
 dmg_type_kb = _kb([[DMG_LATE_TEXT], [DMG_MAHR_TEXT], [BACK_TEXT, MAIN_MENU_TEXT]])
 dmg_calc_date_kb = _kb([[DMG_TODAY_TEXT], [BACK_TEXT, MAIN_MENU_TEXT]])
+MAHR_THIS_YEAR_TEXT = "📅 پرداخت امسال"
+MAHR_DEATH_TEXT = "⚰️ مهریه از ترکه (فوت زوج)"
+mahr_pay_kb = _kb([[MAHR_THIS_YEAR_TEXT], [MAHR_DEATH_TEXT], [BACK_TEXT, MAIN_MENU_TEXT]])
+MAHR_PAY_PROMPT = ("📅 سال پرداخت مهریه را به شمسی وارد کنید، یا «پرداخت امسال» را بزنید.\n"
+                   "اگر مهریه از ترکهٔ زوج متوفی مطالبه می‌شود، «مهریه از ترکه» را بزنید "
+                   "(مادهٔ ۳ آیین‌نامه: تاریخ فوت مبنای محاسبه است).")
+MAHR_DEATH_PROMPT = "⚰️ سال فوت زوج را به شمسی وارد کنید (مثال: 1402):"
 
 CF_NEW_AMOUNT = "🔢 مبلغ جدید"
 CF_CATEGORIES = {
@@ -494,6 +503,8 @@ async def dmg_calc_date(message: Message, state: FSMContext):
     _used(message.chat.id, "damages", "late")
     import damages_pdf
     note = ""
+    approx = ("⚠️ شاخص ماه سررسید (۱۳۶۱ تا ۱۳۶۹) فقط با یک رقم اعشار منتشر شده؛ نتیجه تقریبی است.\n"
+              if r.get("approximate") else "")
     if r["used_latest_available"]:
         note = (f"\n🔸 شاخص ماه پرداخت ({r['pay_key']}) هنوز منتشر نشده؛ از نزدیک‌ترین "
                 f"شاخص موجود ({r['target_key']}) استفاده شد.\n")
@@ -502,7 +513,7 @@ async def dmg_calc_date(message: Message, state: FSMContext):
                f"📈 اصل دین و خسارت: {_fmt(r['updated_amount'])} ریال\n"
                f"💸 خسارت به تنهایی: {_fmt(r['damages'])} ریال\n"
                + (f"🔸 شاخص ماه پرداخت هنوز منتشر نشده؛ شاخص {r['target_key']} استفاده شد.\n"
-                  if r["used_latest_available"] else ""))
+                  if r["used_latest_available"] else "") + approx)
     await _send_pdf_result(
         message, lambda path: damages_pdf.build_late_payment_pdf(
             path, r, due, pay, issuer=access_control.issuer_line(message.chat.id)),
@@ -512,7 +523,7 @@ async def dmg_calc_date(message: Message, state: FSMContext):
         f"📅 سررسید: {_jdate(due)} (شاخص {r['due_key']}: {r['base_index']:g})\n"
         f"📅 پرداخت: {_jdate(pay)} (شاخص {r['target_key']}: {r['target_index']:g})\n\n"
         f"📈 اصل دین و خسارت: *{_fmt(r['updated_amount'])} ریال*\n"
-        f"💸 خسارت به تنهایی: *{_fmt(r['damages'])} ریال*\n{note}\n"
+        f"💸 خسارت به تنهایی: *{_fmt(r['damages'])} ریال*\n{note}\n{approx}"
         f"فرمول: مبلغ × (شاخص {r['target_key']} ÷ شاخص {r['due_key']})\n\n{DISCLAIMER}")
     await damages_entry(message, state, "برای محاسبهٔ دیگر:\n\n")
 
@@ -550,25 +561,96 @@ async def mahr_year(message: Message, state: FSMContext):
     if not raw.isdigit() or not (1300 <= int(raw) <= 1500):
         await message.answer("⚠️ سال را به‌صورت چهار رقمی شمسی وارد کنید (مثال: 1385):")
         return
+    await state.update_data(mahr_year=int(raw))
+    await message.answer(MAHR_PAY_PROMPT, reply_markup=mahr_pay_kb)
+    await state.set_state(UtilForm.mahr_pay)
+
+
+def _parse_year(text: str) -> int | None:
+    raw = dc.normalize_digits(text)
+    return int(raw) if raw.isdigit() and 1300 <= int(raw) <= 1500 else None
+
+
+async def _mahr_back_to_year(message: Message, state: FSMContext):
+    await message.answer("📅 سال وقوع عقد را به شمسی وارد کنید (مثال: 1385):", reply_markup=back_kb)
+    await state.set_state(UtilForm.mahr_year)
+
+
+@utilities_router.message(UtilForm.mahr_pay)
+async def mahr_pay(message: Message, state: FSMContext):
+    text = message.text or ""
+    if _is_main(text):
+        await _to_main(message, state)
+        return
+    if is_back(text):
+        await _mahr_back_to_year(message, state)
+        return
+    if is_button(text, MAHR_DEATH_TEXT):
+        await message.answer(MAHR_DEATH_PROMPT, reply_markup=back_kb)
+        await state.set_state(UtilForm.mahr_death)
+        return
+    if is_button(text, MAHR_THIS_YEAR_TEXT):
+        year = dc.today_jalali()[0]
+    else:
+        year = _parse_year(text)
+        if not year:
+            await message.answer("⚠️ سال را به‌صورت چهار رقمی شمسی وارد کنید (مثال: 1404) "
+                                 "یا یکی از دکمه‌ها را بزنید.", reply_markup=mahr_pay_kb)
+            return
+    await _mahr_finish(message, state, year, "payment")
+
+
+@utilities_router.message(UtilForm.mahr_death)
+async def mahr_death(message: Message, state: FSMContext):
+    text = message.text or ""
+    if _is_main(text):
+        await _to_main(message, state)
+        return
+    if is_back(text):
+        await message.answer(MAHR_PAY_PROMPT, reply_markup=mahr_pay_kb)
+        await state.set_state(UtilForm.mahr_pay)
+        return
+    year = _parse_year(text)
+    if not year:
+        await message.answer("⚠️ " + MAHR_DEATH_PROMPT.replace("⚰️ ", ""))
+        return
+    await _mahr_finish(message, state, year, "death")
+
+
+async def _mahr_finish(message: Message, state: FSMContext, pay_year: int, basis: str):
     data = await state.get_data()
+    marriage_year = data["mahr_year"]
     try:
-        r = dc.calc_mahrieh(data["mahr_amount"], int(raw))
+        r = dc.calc_mahrieh(data["mahr_amount"], marriage_year, payment_year=pay_year, basis=basis)
     except dc.CpiMissing as e:
         logger.warning(f"[MAHRIEH] شاخص ناقص: {e}")
-        await message.answer("⚠️ شاخص تورم لازم برای این سال هنوز در ربات ثبت نشده است.\n"
-                             "مدیر مطلع شد؛ لطفاً کمی بعد دوباره تلاش کنید.")
+        first = dc.first_annual_year()
+        if first and marriage_year < first:
+            await message.answer(f"⚠️ شاخص سالانهٔ سال‌های قبل از {first} هنوز در ربات ثبت نشده است "
+                                 f"(فعلاً سال عقد {first} به بعد قابل محاسبه است).\n"
+                                 "مدیر مطلع شد.")
+        else:
+            await message.answer("⚠️ شاخص تورم لازم برای این سال هنوز در ربات ثبت نشده است.\n"
+                                 "مدیر مطلع شد؛ لطفاً کمی بعد دوباره تلاش کنید.")
         await _notify_admin_missing(message.bot, str(e))
         await damages_entry(message, state)
         return
     except ValueError as e:
-        await message.answer(f"⚠️ {e}")
-        await damages_entry(message, state)
+        # خطای سال پرداخت/فوت: همان مرحله دوباره پرسیده می‌شود
+        if basis == "death":
+            await message.answer(f"⚠️ {e}\n\n{MAHR_DEATH_PROMPT}", reply_markup=back_kb)
+        else:
+            await message.answer(f"⚠️ {e}\n\n{MAHR_PAY_PROMPT}", reply_markup=mahr_pay_kb)
         return
 
     _used(message.chat.id, "damages", "mahrieh")
     import damages_pdf
+    death = basis == "death"
+    event_line = (f"⚰️ سال فوت زوج: {r['payment_year']} (مادهٔ ۳ آیین‌نامه)" if death
+                  else f"📅 سال پرداخت: {r['payment_year']}")
     caption = ("📄 گزارش محاسبهٔ مهریه به نرخ روز\n\n"
                f"💵 مبلغ مهریه: {_fmt(r['amount'])} ریال (سال عقد {r['marriage_year']})\n"
+               f"{event_line}\n"
                f"💍 مهریه به نرخ روز: {_fmt(r['updated_amount'])} ریال\n")
     await _send_pdf_result(
         message, lambda path: damages_pdf.build_mahrieh_pdf(path, r, issuer=access_control.issuer_line(message.chat.id)),
@@ -576,7 +658,9 @@ async def mahr_year(message: Message, state: FSMContext):
         "📊 *نتیجهٔ محاسبهٔ مهریه به نرخ روز*\n\n"
         f"💵 مبلغ مهریه: {_fmt(r['amount'])} ریال\n"
         f"📅 سال عقد: {r['marriage_year']} (شاخص سالانه: {r['base_index']:g})\n"
-        f"📅 سال مبنا: {r['target_year']} (شاخص سالانه: {r['target_index']:g})\n\n"
+        f"{event_line}\n"
+        f"📅 سال مبنا (سال قبل از {'فوت' if death else 'پرداخت'}): {r['target_year']} "
+        f"(شاخص سالانه: {r['target_index']:g})\n\n"
         f"💍 مهریه به نرخ روز: *{_fmt(r['updated_amount'])} ریال*\n\n{DISCLAIMER}")
     await damages_entry(message, state, "برای محاسبهٔ دیگر:\n\n")
 
@@ -1077,6 +1161,9 @@ def cpi_status() -> str:
         f"ماه‌های موجود: {len(series)} ({min(series) if series else '—'} تا "
         f"{dc.month_key(*latest) if latest else '—'})",
         f"اصلاحات دستی: {len(data['overrides'])} ماه، {len(data['annual_1395'])} سال",
+        f"جدول سالانهٔ مهریه (گیت): {len(data['seed_annual'])} سال"
+        + (f" ({min(data['seed_annual'], key=int)} تا {max(data['seed_annual'], key=int)})"
+           if data['seed_annual'] else "") + f"؛ مهریه از سال {dc.first_annual_year(data) or '—'}",
         f"جدول ۱۴۰۰=۱۰۰ بانک مرکزی: تا {max(c1400) if c1400 else '—'}"
         + (f" (ماه پیوند {link}، {len(chained)} ماه زنجیره‌ای)" if link else ""),
         f"آخرین دریافت: {data.get('fetched_at') or '—'}",

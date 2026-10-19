@@ -180,6 +180,10 @@ def build_late_payment_pdf(output_path: str, r: dict, due: tuple, pay: tuple, is
         f"فرمول: {_money(r['amount'])} × ({_idx(r['target_index'])} ÷ {_idx(r['base_index'])})",
         f"شاخص بهای کالاها و خدمات مصرفی بانک مرکزی با سال پایهٔ {r['cpi_base']} استفاده شده است.",
     ]
+    if r.get("approximate"):
+        notes.append(
+            f"هشدار: شاخص ماه سررسید ({month_label(r['due_key'])}) از سال‌های ۱۳۶۱ تا ۱۳۶۹ است که بانک مرکزی "
+            "فقط با یک رقم اعشار منتشر کرده؛ نتیجه تقریبی است و ممکن است اختلاف قابل‌توجهی با محاسبهٔ دقیق داشته باشد.")
     if r["used_latest_available"]:
         notes.append(
             f"شاخص ماه پرداخت ({month_label(r['pay_key'])}) هنوز منتشر نشده و از نزدیک‌ترین شاخص موجود "
@@ -212,6 +216,9 @@ def build_late_payment_pdf(output_path: str, r: dict, due: tuple, pay: tuple, is
 # ══════════════════════════════════════════════════════════════════
 def build_mahrieh_pdf(output_path: str, r: dict, issuer: str = None) -> bool:
     """r: خروجی damages_calc.calc_mahrieh"""
+    death = r.get("basis") == "death"
+    event_label = "سال فوت زوج" if death else "سال تأدیه"
+    event_word = "فوت" if death else "تأدیه"
     ctx = {
         "title": "گزارش محاسبهٔ مهریه به نرخ روز",
         "subtitle": "بر اساس شاخص سالانهٔ بهای کالاها و خدمات مصرفی بانک مرکزی",
@@ -219,19 +226,21 @@ def build_mahrieh_pdf(output_path: str, r: dict, issuer: str = None) -> bool:
         "inputs": [
             ("مبلغ مهریه", f"{_money(r['amount'])} ریال", True),
             ("سال وقوع عقد", str(r["marriage_year"])),
-            ("سال تأدیه", str(r["target_year"] + 1)),
+            (event_label, str(r.get("payment_year", r["target_year"] + 1))),
         ],
         "indices": [
             ("شاخص سال عقد", f"{_idx(r['base_index'])}  (سال {r['marriage_year']})"),
-            ("شاخص سال قبل از تأدیه", f"{_idx(r['target_index'])}  (سال {r['target_year']})"),
+            (f"شاخص سال قبل از {event_word}", f"{_idx(r['target_index'])}  (سال {r['target_year']})"),
         ],
         "results": [("مهریه به نرخ روز", r["updated_amount"])],
         "words": num_to_words(r["updated_amount"]),
         "notes": [
-            "مهریهٔ به نرخ روز برابر است با مبلغ مهریه ضربدر عدد شاخص سال قبل از سال تأدیه، "
-            "تقسیم بر عدد شاخص سال وقوع عقد.",
+            f"مهریهٔ به نرخ روز برابر است با مبلغ مهریه ضربدر عدد شاخص سال قبل از سال {event_word}، "
+            "تقسیم بر عدد شاخص سال وقوع عقد (مادهٔ ۲ آیین‌نامهٔ اجرایی تبصرهٔ مادهٔ ۱۰۸۲ ق.م.).",
+            *(["مهریه از ترکهٔ زوج متوفی پرداخت می‌شود؛ طبق مادهٔ ۳ همان آیین‌نامه، "
+               "تاریخ فوت مبنای محاسبه است."] if death else []),
             f"فرمول: {_money(r['amount'])} × ({_idx(r['target_index'])} ÷ {_idx(r['base_index'])})",
-            f"شاخص سالانه = میانگین شاخص ماهانهٔ بانک مرکزی همان سال (سال پایهٔ {r['cpi_base']}).",
+            f"شاخص سالانه: جدول شاخص سالانهٔ بانک مرکزی (سال پایهٔ {r['cpi_base']}).",
         ],
         "law": ART_1082,
         "issuer": issuer,
