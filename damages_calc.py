@@ -321,12 +321,27 @@ def calc_late_payment(amount: int, due: tuple[int, int, int],
     }
 
 
-def calc_mahrieh(amount: int, marriage_year: int, payment_year: int | None = None) -> dict:
+MAHR_BASIS = ("payment", "death")
+
+
+def calc_mahrieh(amount: int, marriage_year: int, payment_year: int | None = None,
+                 basis: str = "payment") -> dict:
+    """
+    basis="payment": payment_year = سال تأدیه (پیش‌فرض: سال جاری) — مادهٔ ۲ آیین‌نامه
+    basis="death":   payment_year = سال فوت زوج؛ مهریه از ترکه — مادهٔ ۳ آیین‌نامه
+    در هر دو حالت شاخص «سال قبل» از سال مبنا اعمال می‌شود.
+    """
+    if basis not in MAHR_BASIS:
+        raise ValueError(f"basis نامعتبر: {basis}")
     data = load_cpi()
-    payment_year = payment_year or today_jalali()[0]
+    this_year = today_jalali()[0]
+    payment_year = payment_year or this_year
+    event = "فوت زوج" if basis == "death" else "پرداخت"
+    if payment_year > this_year:
+        raise ValueError(f"سال {event} نمی‌تواند بعد از سال جاری ({this_year}) باشد.")
+    if payment_year <= marriage_year:
+        raise ValueError(f"سال {event} باید بعد از سال وقوع عقد باشد.")
     target_year = payment_year - 1
-    if marriage_year > target_year:
-        raise ValueError("مهریهٔ عقدِ همین سال نیاز به محاسبهٔ نرخ روز ندارد.")
     base_idx = annual_index(marriage_year, data)
     if base_idx is None:
         first = first_annual_year(data)
@@ -339,6 +354,8 @@ def calc_mahrieh(amount: int, marriage_year: int, payment_year: int | None = Non
     return {
         "amount": amount,
         "marriage_year": marriage_year,
+        "payment_year": payment_year,
+        "basis": basis,
         "target_year": target_year,
         "base_index": base_idx,
         "target_index": target_idx,

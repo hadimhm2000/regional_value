@@ -198,3 +198,25 @@ def test_mahrieh_rule_year_before_payment_not_payment_year():
     # مادهٔ ۲ آیین‌نامهٔ تبصرهٔ مادهٔ ۱۰۸۲: شاخص «سال قبل» از سال تأدیه/فوت — نه خودِ آن سال (برخلاف دادحساب)
     r = dc.calc_mahrieh(1_000_000, 1390, payment_year=1402)
     assert r["target_year"] == 1401 and r["target_index"] == 640.225
+
+
+def test_mahrieh_death_basis_article_3(tmp_path):
+    # مادهٔ ۳ آیین‌نامه: مهریه از ترکه ← سال فوت مبناست؛ شاخص سال قبل از فوت
+    r = dc.calc_mahrieh(5_000_000, 1370, payment_year=1402, basis="death")
+    assert r["basis"] == "death" and r["payment_year"] == 1402 and r["target_year"] == 1401
+    assert r["updated_amount"] == round(5_000_000 * 640.225 / 1.189)
+    import damages_pdf
+    out = tmp_path / "death.pdf"
+    assert damages_pdf.build_mahrieh_pdf(str(out), r)
+    assert out.read_bytes()[:4] == b"%PDF"
+
+
+def test_mahrieh_payment_year_validation():
+    this_year = dc.today_jalali()[0]
+    with pytest.raises(ValueError, match="بعد از سال جاری"):
+        dc.calc_mahrieh(1_000, 1390, payment_year=this_year + 1)
+    with pytest.raises(ValueError, match="بعد از سال وقوع عقد"):
+        dc.calc_mahrieh(1_000, 1400, payment_year=1400, basis="death")
+    with pytest.raises(ValueError):
+        dc.calc_mahrieh(1_000, 1390, payment_year=1400, basis="other")
+    assert dc.calc_mahrieh(1_000, 1400)["payment_year"] == this_year
