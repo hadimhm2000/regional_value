@@ -51,6 +51,7 @@ from urllib.parse import urlparse
 DEFAULT_URLS = [
     "https://app.dadhesab.com/bloodmoney",
     "https://app.dadhesab.com/inheritance",
+    "https://app.dadhesab.com/dowry",
 ]
 
 # کلمات کلیدی برای پیدا کردن جدول‌ها و فرمول‌ها در کد
@@ -65,6 +66,10 @@ KEYWORDS = [
     "همسر", "پسر", "دختر", "پدر", "مادر", "برادر", "خواهر", "جد", "جده", "عمو", "عمه", "دایی", "خاله",
     "نوه", "ابوینی", "ابی", "امی", "ثمن", "ربع", "نصف", "سدس", "ثلث", "ثلثان", "حجب", "رد",
     "inheritance", "heir", "estate", "spouse",
+    # مهریه و خسارت تأخیر تأدیه (جدول شاخص سالانه/ماهانه)
+    "مهریه", "مهر", "نرخ روز", "شاخص", "تورم", "سال عقد", "سال وقوع عقد", "تأدیه", "تادیه",
+    "1315", "1316", "1350", "1374", "1375", "437.032", "437/032",
+    "dowry", "mahr", "mehrieh", "cpi", "index", "inflation", "annual",
 ]
 
 _SKIP_HEADERS = {"cookie", "set-cookie", "authorization", "proxy-authorization", "x-csrf-token", "x-xsrf-token"}

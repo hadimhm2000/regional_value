@@ -135,3 +135,49 @@ def test_result_pdfs_are_built(tmp_path):
     assert damages_pdf.build_mahrieh_pdf(str(mahr), m)
     assert late.read_bytes()[:4] == b"%PDF" and mahr.read_bytes()[:4] == b"%PDF"
     assert damages_pdf.month_label("1403/07") == "مهر 1403"
+
+
+# ── جدول سالانهٔ مهریه (قبل از ۱۳۷۵) ──────────────────────────────────────
+
+def test_official_1400_annual_matches_monthly_average():
+    # عدد رسمی بانک مرکزی برای ۱۴۰۰ (نامهٔ ۱۴۰۱/۳/۱۷) = ۴۳۷٫۰۳۲
+    assert abs(dc.annual_index(1400) - 437.032) < 0.05
+    assert dc.first_annual_year() == 1375
+
+
+def test_mahrieh_before_1375_needs_annual_table(tmp_path, monkeypatch):
+    monkeypatch.setattr(dc, "ANNUAL_SEED_FILE", str(tmp_path / "none.json"))
+    with pytest.raises(dc.CpiMissing, match="1375"):
+        dc.calc_mahrieh(1_000_000, 1360, payment_year=1405)
+
+
+def test_import_annual_table_rescales_and_feeds_mahrieh(tmp_path, monkeypatch):
+    import tools.import_annual_index as imp
+    out = tmp_path / "cpi_annual_1395.json"
+    monkeypatch.setattr(dc, "ANNUAL_SEED_FILE", str(out))
+    monkeypatch.setattr(imp, "OUT_FILE", str(out))
+    avgs = imp.monthly_averages()
+    k = 100 / avgs[1390]                     # جدول ورودی با پایهٔ ۱۳۹۰=۱۰۰ و ارقام فارسی
+    fa = str.maketrans("0123456789.", "۰۱۲۳۴۵۶۷۸۹/")
+    lines = ["سال,شاخص", "1360," + f"{0.5 * k:.6f}".translate(fa)]
+    lines += [f"{y},{(v * k):.6f}".translate(fa) for y, v in avgs.items()]
+    src = tmp_path / "annual.csv"
+    src.write_text("\n".join(lines), encoding="utf-8")
+    assert imp.main([str(src), "--source", "test"]) == 0
+    assert abs(dc.annual_index(1360) - 0.5) < 1e-4
+    assert dc.first_annual_year() == 1360
+    r = dc.calc_mahrieh(1_000_000, 1360, payment_year=1405)
+    assert r["updated_amount"] == round(1_000_000 * dc.annual_index(1404) / dc.annual_index(1360))
+    dc.import_rows([(1360, None, 0.6)])      # ثبت دستی مدیر بر جدول گیت اولویت دارد
+    assert dc.annual_index(1360) == 0.6
+
+
+def test_import_rejects_wrong_table(tmp_path, monkeypatch):
+    import tools.import_annual_index as imp
+    monkeypatch.setattr(imp, "OUT_FILE", str(tmp_path / "out.json"))
+    avgs = imp.monthly_averages()
+    rows = [f"{y},{v * (1.5 if y == 1390 else 1):.4f}" for y, v in avgs.items()]
+    src = tmp_path / "bad.csv"
+    src.write_text("\n".join(rows), encoding="utf-8")
+    assert imp.main([str(src)]) == 2
+    assert not (tmp_path / "out.json").exists()

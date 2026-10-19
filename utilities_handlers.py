@@ -555,8 +555,14 @@ async def mahr_year(message: Message, state: FSMContext):
         r = dc.calc_mahrieh(data["mahr_amount"], int(raw))
     except dc.CpiMissing as e:
         logger.warning(f"[MAHRIEH] شاخص ناقص: {e}")
-        await message.answer("⚠️ شاخص تورم لازم برای این سال هنوز در ربات ثبت نشده است.\n"
-                             "مدیر مطلع شد؛ لطفاً کمی بعد دوباره تلاش کنید.")
+        first = dc.first_annual_year()
+        if first and int(raw) < first:
+            await message.answer(f"⚠️ شاخص سالانهٔ سال‌های قبل از {first} هنوز در ربات ثبت نشده است "
+                                 f"(فعلاً سال عقد {first} به بعد قابل محاسبه است).\n"
+                                 "مدیر مطلع شد.")
+        else:
+            await message.answer("⚠️ شاخص تورم لازم برای این سال هنوز در ربات ثبت نشده است.\n"
+                                  "مدیر مطلع شد؛ لطفاً کمی بعد دوباره تلاش کنید.")
         await _notify_admin_missing(message.bot, str(e))
         await damages_entry(message, state)
         return
@@ -1077,6 +1083,9 @@ def cpi_status() -> str:
         f"ماه‌های موجود: {len(series)} ({min(series) if series else '—'} تا "
         f"{dc.month_key(*latest) if latest else '—'})",
         f"اصلاحات دستی: {len(data['overrides'])} ماه، {len(data['annual_1395'])} سال",
+        f"جدول سالانهٔ مهریه (گیت): {len(data['seed_annual'])} سال"
+        + (f" ({min(data['seed_annual'], key=int)} تا {max(data['seed_annual'], key=int)})"
+           if data['seed_annual'] else "") + f"؛ مهریه از سال {dc.first_annual_year(data) or '—'}",
         f"جدول ۱۴۰۰=۱۰۰ بانک مرکزی: تا {max(c1400) if c1400 else '—'}"
         + (f" (ماه پیوند {link}، {len(chained)} ماه زنجیره‌ای)" if link else ""),
         f"آخرین دریافت: {data.get('fetched_at') or '—'}",

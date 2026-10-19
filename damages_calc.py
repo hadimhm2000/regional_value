@@ -33,7 +33,13 @@ cpi_index.json (در پوشهٔ دادهٔ ربات DATA_DIR، در گیت نی�
       استفاده و در نتیجه اعلام می‌شود (مثل دادحساب: پرداخت مهر ۱۴۰۵ ← شهریور ۱۴۰۵).
   مهریه به نرخ روز (تبصرهٔ مادهٔ ۱۰۸۲ قانون مدنی):
       مهریهٔ به‌روز = مبلغ × (شاخص سال قبل از سال تأدیه ÷ شاخص سال وقوع عقد)
-      شاخص سالانه = مقدار ثبت‌شدهٔ سالانه، یا میانگین ۱۲ ماه همان سال.
+      شاخص سالانه، به ترتیب اولویت:
+        ۱) ثبت دستی مدیر (cpi_index.json ← "annual_1395"، با /cpi_year)
+        ۲) جدول سالانهٔ رسمی در گیت (assets/cpi_annual_1395.json ← "annual")
+           — بانک مرکزی شاخص سالانه را از ۱۳۱۵ اعلام کرده (پیوست نامه‌های سالانه به
+           قوه قضاییه)؛ این فایل با tools/import_annual_index.py ساخته می‌شود.
+        ۳) میانگین ۱۲ ماه همان سال از سری ماهانه (فقط ۱۳۷۵ به بعد).
+      صحت روش ۳: میانگین ماه‌های ۱۴۰۰ = ۴۳۷٫۰۴۲؛ عدد رسمی اعلام‌شده = ۴۳۷٫۰۳۲.
 """
 import datetime
 import json
@@ -46,6 +52,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR = os.environ.get("DATA_DIR", os.path.join(_HERE, "data"))
 CPI_FILE = os.path.join(_DATA_DIR, "cpi_index.json")
 SEED_FILE = os.path.join(_HERE, "assets", "cpi_judicial_1395.json")
+ANNUAL_SEED_FILE = os.path.join(_HERE, "assets", "cpi_annual_1395.json")
 
 _DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
@@ -149,16 +156,18 @@ def load_cpi() -> dict:
     """دادهٔ خام: seed (در گیت) + cpi_index.json (اصلاحات مدیر و جدول ۱۴۰۰ بانک مرکزی)."""
     with _lock:
         seed = _load_json(SEED_FILE)
+        annual_seed = _load_json(ANNUAL_SEED_FILE)
         data = _load_json(CPI_FILE)
     data.setdefault("overrides", {})
     data.setdefault("annual_1395", {})
     data.setdefault("monthly_1400", {})
     data["seed"] = seed.get("monthly", {})
+    data["seed_annual"] = {str(k): float(v) for k, v in annual_seed.get("annual", {}).items()}
     return data
 
 
 def save_cpi(data: dict):
-    data = {k: v for k, v in data.items() if k not in ("seed",)}
+    data = {k: v for k, v in data.items() if k not in ("seed", "seed_annual")}
     data["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
     tmp = CPI_FILE + ".tmp"
     os.makedirs(os.path.dirname(CPI_FILE), exist_ok=True)
@@ -242,10 +251,23 @@ def missing_required_month(today: tuple[int, int, int] | None = None) -> tuple[i
     return py, pm
 
 
+def first_annual_year(data: dict | None = None) -> int | None:
+    """قدیمی‌ترین سالی که شاخص سالانه‌اش (ثبت‌شده یا قابل محاسبه از ماه‌ها) موجود است."""
+    data = data or load_cpi()
+    years = [int(y) for y in data["annual_1395"]] + [int(y) for y in data.get("seed_annual", {})]
+    series = judicial_series(data)[0]
+    if series:
+        y0 = int(min(series)[:4])
+        years.append(y0 if annual_index(y0, data) is not None else y0 + 1)
+    return min(years) if years else None
+
+
 def annual_index(year: int, data: dict | None = None) -> float | None:
     data = data or load_cpi()
     if str(year) in data["annual_1395"]:
         return data["annual_1395"][str(year)]
+    if str(year) in data.get("seed_annual", {}):
+        return data["seed_annual"][str(year)]
     series = judicial_series(data)[0]
     values = [series.get(month_key(year, m)) for m in range(1, 13)]
     if all(v is not None for v in values):
@@ -307,7 +329,9 @@ def calc_mahrieh(amount: int, marriage_year: int, payment_year: int | None = Non
         raise ValueError("مهریهٔ عقدِ همین سال نیاز به محاسبهٔ نرخ روز ندارد.")
     base_idx = annual_index(marriage_year, data)
     if base_idx is None:
-        raise CpiMissing(f"شاخص سالانهٔ سال {marriage_year} وارد نشده است.")
+        first = first_annual_year(data)
+        hint = f" (شاخص سالانه از سال {first} به بعد موجود است)" if first else ""
+        raise CpiMissing(f"شاخص سالانهٔ سال {marriage_year} وارد نشده است{hint}.")
     target_idx = annual_index(target_year, data)
     if target_idx is None:
         raise CpiMissing(f"شاخص سالانهٔ سال {target_year} وارد نشده است.")
