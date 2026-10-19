@@ -180,6 +180,10 @@ def build_late_payment_pdf(output_path: str, r: dict, due: tuple, pay: tuple, is
         f"فرمول: {_money(r['amount'])} × ({_idx(r['target_index'])} ÷ {_idx(r['base_index'])})",
         f"شاخص بهای کالاها و خدمات مصرفی بانک مرکزی با سال پایهٔ {r['cpi_base']} استفاده شده است.",
     ]
+    if r.get("approximate"):
+        notes.append(
+            f"هشدار: شاخص ماه سررسید ({month_label(r['due_key'])}) از سال‌های ۱۳۶۱ تا ۱۳۶۹ است که بانک مرکزی "
+            "فقط با یک رقم اعشار منتشر کرده؛ نتیجه تقریبی است و ممکن است اختلاف قابل‌توجهی با محاسبهٔ دقیق داشته باشد.")
     if r["used_latest_available"]:
         notes.append(
             f"شاخص ماه پرداخت ({month_label(r['pay_key'])}) هنوز منتشر نشده و از نزدیک‌ترین شاخص موجود "

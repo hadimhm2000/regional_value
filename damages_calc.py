@@ -8,7 +8,8 @@
 سری شاخص مورد استفاده: شاخص ماهانه با سال پایهٔ ۱۳۹۵=۱۰۰ (همان سری که در
 محاسبات خسارت تأخیر تأدیه و سامانه‌هایی مثل دادحساب استفاده می‌شود). از سه
 منبع ساخته می‌شود:
-  ۱) assets/cpi_judicial_1395.json (در گیت): جدول دادحساب، فروردین ۱۳۷۵ تا آخرین ماه فایل
+  ۱) assets/cpi_judicial_1395.json (در گیت): جدول دادحساب، فروردین ۱۳۶۱ تا آخرین ماه فایل
+     (ماه‌های تا "approximate_until" = ۱۳۶۹/۱۲ فقط یک رقم اعشار دارند ← نتیجه با هشدار «تقریبی»)
   ۲) cpi_index.json ← "overrides": مقادیری که مدیر با /cpi یا اکسل ثبت/اصلاح کرده
   ۳) cpi_index.json ← "monthly_1400": جدول ۱۴۰۰=۱۰۰ که هر ماه خودکار از PDF
      بانک مرکزی (cbi.ir/simplelist/1611.aspx، cpi_fetcher.py) خوانده می‌شود.
@@ -162,12 +163,13 @@ def load_cpi() -> dict:
     data.setdefault("annual_1395", {})
     data.setdefault("monthly_1400", {})
     data["seed"] = seed.get("monthly", {})
+    data["approximate_until"] = seed.get("approximate_until", "")
     data["seed_annual"] = {str(k): float(v) for k, v in annual_seed.get("annual", {}).items()}
     return data
 
 
 def save_cpi(data: dict):
-    data = {k: v for k, v in data.items() if k not in ("seed", "seed_annual")}
+    data = {k: v for k, v in data.items() if k not in ("seed", "seed_annual", "approximate_until")}
     data["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
     tmp = CPI_FILE + ".tmp"
     os.makedirs(os.path.dirname(CPI_FILE), exist_ok=True)
@@ -317,6 +319,7 @@ def calc_late_payment(amount: int, due: tuple[int, int, int],
         "damages": updated - amount,
         "used_latest_available": used_latest,
         "chained": target_key in chained,
+        "approximate": bool(data["approximate_until"]) and due_key <= data["approximate_until"],
         "cpi_base": CPI_BASE,
     }
 

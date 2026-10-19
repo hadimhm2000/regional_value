@@ -503,6 +503,8 @@ async def dmg_calc_date(message: Message, state: FSMContext):
     _used(message.chat.id, "damages", "late")
     import damages_pdf
     note = ""
+    approx = ("⚠️ شاخص ماه سررسید (۱۳۶۱ تا ۱۳۶۹) فقط با یک رقم اعشار منتشر شده؛ نتیجه تقریبی است.\n"
+              if r.get("approximate") else "")
     if r["used_latest_available"]:
         note = (f"\n🔸 شاخص ماه پرداخت ({r['pay_key']}) هنوز منتشر نشده؛ از نزدیک‌ترین "
                 f"شاخص موجود ({r['target_key']}) استفاده شد.\n")
@@ -511,7 +513,7 @@ async def dmg_calc_date(message: Message, state: FSMContext):
                f"📈 اصل دین و خسارت: {_fmt(r['updated_amount'])} ریال\n"
                f"💸 خسارت به تنهایی: {_fmt(r['damages'])} ریال\n"
                + (f"🔸 شاخص ماه پرداخت هنوز منتشر نشده؛ شاخص {r['target_key']} استفاده شد.\n"
-                  if r["used_latest_available"] else ""))
+                  if r["used_latest_available"] else "") + approx)
     await _send_pdf_result(
         message, lambda path: damages_pdf.build_late_payment_pdf(
             path, r, due, pay, issuer=access_control.issuer_line(message.chat.id)),
@@ -521,7 +523,7 @@ async def dmg_calc_date(message: Message, state: FSMContext):
         f"📅 سررسید: {_jdate(due)} (شاخص {r['due_key']}: {r['base_index']:g})\n"
         f"📅 پرداخت: {_jdate(pay)} (شاخص {r['target_key']}: {r['target_index']:g})\n\n"
         f"📈 اصل دین و خسارت: *{_fmt(r['updated_amount'])} ریال*\n"
-        f"💸 خسارت به تنهایی: *{_fmt(r['damages'])} ریال*\n{note}\n"
+        f"💸 خسارت به تنهایی: *{_fmt(r['damages'])} ریال*\n{note}\n{approx}"
         f"فرمول: مبلغ × (شاخص {r['target_key']} ÷ شاخص {r['due_key']})\n\n{DISCLAIMER}")
     await damages_entry(message, state, "برای محاسبهٔ دیگر:\n\n")
 

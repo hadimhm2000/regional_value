@@ -23,7 +23,7 @@ def test_seed_series_matches_published_values():
     series, chained, link = dc.judicial_series()
     assert series["1403/07"] == 1339.1          # مهر ۱۴۰۳ (جدول دادحساب)
     assert series["1405/06"] == 3452.0
-    assert series["1395/07"] == 100.0 and min(series) == "1375/01"
+    assert series["1395/07"] == 100.0 and min(series) == "1361/01"
     assert not chained and link is None
 
 
@@ -62,7 +62,7 @@ def test_manual_override_wins_over_seed():
 
 def test_due_before_series_start():
     with pytest.raises(ValueError):
-        dc.calc_late_payment(1_000_000, (1374, 1, 1), (1402, 5, 1))
+        dc.calc_late_payment(1_000_000, (1360, 12, 1), (1402, 5, 1))
 
 
 def test_mahrieh_uses_year_before_payment_and_averages(tmp_path, monkeypatch):
@@ -158,7 +158,7 @@ def test_official_1400_annual_matches_monthly_average(tmp_path, monkeypatch):
 
 def test_mahrieh_before_1375_needs_annual_table(tmp_path, monkeypatch):
     monkeypatch.setattr(dc, "ANNUAL_SEED_FILE", str(tmp_path / "none.json"))
-    with pytest.raises(dc.CpiMissing, match="1375"):
+    with pytest.raises(dc.CpiMissing, match="1361"):
         dc.calc_mahrieh(1_000_000, 1360, payment_year=1405)
 
 
@@ -220,3 +220,16 @@ def test_mahrieh_payment_year_validation():
     with pytest.raises(ValueError):
         dc.calc_mahrieh(1_000, 1390, payment_year=1400, basis="other")
     assert dc.calc_mahrieh(1_000, 1400)["payment_year"] == this_year
+
+
+def test_late_payment_from_1361_with_approximate_flag(tmp_path):
+    # ۱۳۶۱ تا ۱۳۷۴ از جدول دادحساب (بانک مرکزی)؛ تا ۱۳۶۹/۱۲ فقط یک رقم اعشار ← تقریبی
+    r = dc.calc_late_payment(1_000_000, (1361, 1, 10), (1405, 6, 1))
+    assert r["base_index"] == 0.3 and r["approximate"]
+    assert r["updated_amount"] == round(1_000_000 * 3452.0 / 0.3)
+    r2 = dc.calc_late_payment(1_000_000, (1370, 1, 10), (1405, 6, 1))
+    assert r2["base_index"] == 1.086 and not r2["approximate"]
+    assert not dc.calc_late_payment(1_000_000, (1400, 1, 1), (1405, 6, 1))["approximate"]
+    import damages_pdf
+    out = tmp_path / "approx.pdf"
+    assert damages_pdf.build_late_payment_pdf(str(out), r, (1361, 1, 10), (1405, 6, 1))
