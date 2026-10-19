@@ -65,7 +65,8 @@ def test_due_before_series_start():
         dc.calc_late_payment(1_000_000, (1374, 1, 1), (1402, 5, 1))
 
 
-def test_mahrieh_uses_year_before_payment_and_averages():
+def test_mahrieh_uses_year_before_payment_and_averages(tmp_path, monkeypatch):
+    monkeypatch.setattr(dc, "ANNUAL_SEED_FILE", str(tmp_path / "none.json"))   # فقط میانگین ماهانه
     r = dc.calc_mahrieh(10_000_000, 1400, payment_year=1405)
     assert r["target_year"] == 1404
     assert r["base_index"] == 437.042
@@ -78,7 +79,17 @@ def test_mahrieh_explicit_annual_index():
     r = dc.calc_mahrieh(1_000, 1365, payment_year=1405)
     assert r["base_index"] == 0.85
     with pytest.raises(dc.CpiMissing):
-        dc.calc_mahrieh(1_000, 1360, payment_year=1405)
+        dc.calc_mahrieh(1_000, 1314, payment_year=1405)
+
+
+def test_annual_seed_from_dadhesab_cbi_table():
+    # جدول سالانهٔ دادحساب (API cpis، منبع بانک مرکزی، پایهٔ ۱۳۹۵)
+    assert dc.first_annual_year() == 1315
+    assert dc.annual_index(1315) == 0.004 and dc.annual_index(1350) == 0.056
+    assert dc.annual_index(1375) == 4.52 and dc.annual_index(1400) == 437.042
+    assert dc.annual_index(1404) == 1961.6
+    r = dc.calc_mahrieh(1_000_000, 1350, payment_year=1405)
+    assert r["target_year"] == 1404 and r["updated_amount"] == 35_028_571_429
 
 
 def test_missing_required_month():
@@ -139,10 +150,10 @@ def test_result_pdfs_are_built(tmp_path):
 
 # ── جدول سالانهٔ مهریه (قبل از ۱۳۷۵) ──────────────────────────────────────
 
-def test_official_1400_annual_matches_monthly_average():
+def test_official_1400_annual_matches_monthly_average(tmp_path, monkeypatch):
+    monkeypatch.setattr(dc, "ANNUAL_SEED_FILE", str(tmp_path / "none.json"))
     # عدد رسمی بانک مرکزی برای ۱۴۰۰ (نامهٔ ۱۴۰۱/۳/۱۷) = ۴۳۷٫۰۳۲
     assert abs(dc.annual_index(1400) - 437.032) < 0.05
-    assert dc.first_annual_year() == 1375
 
 
 def test_mahrieh_before_1375_needs_annual_table(tmp_path, monkeypatch):
