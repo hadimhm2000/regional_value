@@ -192,3 +192,9 @@ def test_import_rejects_wrong_table(tmp_path, monkeypatch):
     src.write_text("\n".join(rows), encoding="utf-8")
     assert imp.main([str(src)]) == 2
     assert not (tmp_path / "out.json").exists()
+
+
+def test_mahrieh_rule_year_before_payment_not_payment_year():
+    # مادهٔ ۲ آیین‌نامهٔ تبصرهٔ مادهٔ ۱۰۸۲: شاخص «سال قبل» از سال تأدیه/فوت — نه خودِ آن سال (برخلاف دادحساب)
+    r = dc.calc_mahrieh(1_000_000, 1390, payment_year=1402)
+    assert r["target_year"] == 1401 and r["target_index"] == 640.225
